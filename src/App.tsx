@@ -85,6 +85,7 @@ import { ApiKeyModal } from './components/ApiKeyModal';
 import { BilingualModal } from './components/BilingualModal';
 import { HelpModal } from './components/HelpModal';
 import { ToastContainer } from './components/Toast';
+import { BatchReplaceOptions, BatchReplaceResult } from './components/BatchFindReplaceModal';
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(true);
@@ -269,6 +270,8 @@ export default function App() {
   // Batch File Queue State (Multi-file sequential translation)
   const [fileQueue, setFileQueue] = useState<QueueFileItem[]>([]);
   const [activeQueueFileId, setActiveQueueFileId] = useState<string | null>(null);
+  const activeQueueFileIdRef = useRef<string | null>(null);
+  activeQueueFileIdRef.current = activeQueueFileId;
   const [autoAdvanceQueue, setAutoAdvanceQueue] = useState<boolean>(() => {
     return localStorage.getItem('subgamelab_auto_advance_queue') !== 'false';
   });
@@ -735,6 +738,7 @@ export default function App() {
 
   // Activate a specific file from the queue in the editor
   const activateQueueFile = (qFile: QueueFileItem) => {
+    activeQueueFileIdRef.current = qFile.id;
     setActiveQueueFileId(qFile.id);
     setFileName(qFile.name);
     setFileSize(qFile.size);
@@ -902,6 +906,131 @@ export default function App() {
       );
     }
   }, [items, activeQueueFileId]);
+
+  // Global Find and Replace Across All Queued & Translated Files
+  const handleGlobalBatchReplace = (
+    findText: string,
+    replaceText: string,
+    options: BatchReplaceOptions
+  ): BatchReplaceResult => {
+    if (!findText) {
+      return { totalReplacements: 0, affectedFilesCount: 0, fileDetails: [] };
+    }
+
+    let regex: RegExp;
+    try {
+      if (options.useRegex) {
+        regex = new RegExp(findText, options.matchCase ? 'g' : 'gi');
+      } else {
+        let escaped = findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (options.wholeWord) {
+          escaped = `\\b${escaped}\\b`;
+        }
+        regex = new RegExp(escaped, options.matchCase ? 'g' : 'gi');
+      }
+    } catch (err: any) {
+      showToast(`خطا در فرمت عبارت جستجو: ${err?.message}`, 'error');
+      return { totalReplacements: 0, affectedFilesCount: 0, fileDetails: [] };
+    }
+
+    let totalReplacements = 0;
+    const fileDetails: Array<{ fileId: string; fileName: string; count: number }> = [];
+
+    // If queue has files, replace across all queue files
+    if (fileQueueRef.current.length > 0) {
+      const updatedQueue = fileQueueRef.current.map((file) => {
+        let fileCount = 0;
+        const updatedItems = file.items.map((item) => {
+          let newTrans = item.translatedText;
+          let newOrig = item.originalText;
+
+          if ((options.scope === 'translated' || options.scope === 'both') && item.translatedText) {
+            const matches = item.translatedText.match(regex);
+            if (matches) {
+              fileCount += matches.length;
+              newTrans = item.translatedText.replace(regex, replaceText);
+            }
+          }
+
+          if (options.scope === 'both' && item.originalText) {
+            const matches = item.originalText.match(regex);
+            if (matches) {
+              fileCount += matches.length;
+              newOrig = item.originalText.replace(regex, replaceText);
+            }
+          }
+
+          return {
+            ...item,
+            translatedText: newTrans,
+            originalText: newOrig,
+          };
+        });
+
+        if (fileCount > 0) {
+          totalReplacements += fileCount;
+          fileDetails.push({ fileId: file.id, fileName: file.name, count: fileCount });
+        }
+
+        return {
+          ...file,
+          items: updatedItems,
+        };
+      });
+
+      setFileQueue(updatedQueue);
+      fileQueueRef.current = updatedQueue;
+
+      // Update current active editor items if needed
+      if (activeQueueFileIdRef.current) {
+        const currentActive = updatedQueue.find((f) => f.id === activeQueueFileIdRef.current);
+        if (currentActive) {
+          setItems(currentActive.items);
+        }
+      }
+    } else if (items.length > 0) {
+      // Standalone single file without queue
+      let fileCount = 0;
+      const updatedItems = items.map((item) => {
+        let newTrans = item.translatedText;
+        let newOrig = item.originalText;
+
+        if ((options.scope === 'translated' || options.scope === 'both') && item.translatedText) {
+          const matches = item.translatedText.match(regex);
+          if (matches) {
+            fileCount += matches.length;
+            newTrans = item.translatedText.replace(regex, replaceText);
+          }
+        }
+
+        if (options.scope === 'both' && item.originalText) {
+          const matches = item.originalText.match(regex);
+          if (matches) {
+            fileCount += matches.length;
+            newOrig = item.originalText.replace(regex, replaceText);
+          }
+        }
+
+        return { ...item, translatedText: newTrans, originalText: newOrig };
+      });
+
+      if (fileCount > 0) {
+        totalReplacements += fileCount;
+        fileDetails.push({ fileId: 'active', fileName: fileName || 'current_file', count: fileCount });
+        setItems(updatedItems);
+      }
+    }
+
+    const affectedFilesCount = fileDetails.length;
+    showToast(
+      uiLang === 'en'
+        ? `Replaced ${totalReplacements} occurrence(s) across ${affectedFilesCount} file(s)!`
+        : `تعداد ${totalReplacements} مورد با موفقیت در ${affectedFilesCount} فایل جایگزین شدند!`,
+      'success'
+    );
+
+    return { totalReplacements, affectedFilesCount, fileDetails };
+  };
 
   // Listen to file upload events
   useEffect(() => {
@@ -1402,9 +1531,37 @@ export default function App() {
   };
 
   // Start Batch or Live Streaming Translation Process
-  const handleStartTranslation = async () => {
+  const handleStartTranslation = async (targetFileId?: string) => {
     if (isTranslatingRef.current) return;
-    if (items.length === 0) {
+
+    let currentFileId = targetFileId || activeQueueFileIdRef.current;
+    if ((!currentFileId || fileQueueRef.current.find((f) => f.id === currentFileId)?.status === 'completed') && fileQueueRef.current.length > 0) {
+      const firstPending = fileQueueRef.current.find((f) => f.status === 'pending');
+      if (firstPending) {
+        currentFileId = firstPending.id;
+        activateQueueFile(firstPending);
+      }
+    }
+
+    // Determine target items to translate
+    let currentItems = items;
+    if (currentFileId) {
+      const queueFile = fileQueueRef.current.find((f) => f.id === currentFileId);
+      if (queueFile) {
+        currentItems = queueFile.items;
+        if (activeQueueFileIdRef.current !== currentFileId) {
+          activateQueueFile(queueFile);
+        }
+      }
+      // Immediately mark as translating in queue
+      setFileQueue((prev) => {
+        const nextQ = prev.map((f) => (f.id === currentFileId ? { ...f, status: 'translating' as const } : f));
+        fileQueueRef.current = nextQ;
+        return nextQ;
+      });
+    }
+
+    if (currentItems.length === 0) {
       showToast(t.noSubtitlesToTranslate, 'warning');
       return;
     }
@@ -1473,7 +1630,7 @@ export default function App() {
     }
 
     const BATCH_SIZE = batchSize || 35;
-    const totalCount = items.length;
+    const totalCount = currentItems.length;
     const totalBatchesCount = Math.ceil(totalCount / BATCH_SIZE);
 
     setTotalBatches(totalBatchesCount);
@@ -1496,7 +1653,7 @@ export default function App() {
       setCurrentBatch(b + 1);
 
       const startIndex = b * BATCH_SIZE;
-      const batchSlice = items.slice(startIndex, startIndex + BATCH_SIZE);
+      const batchSlice = currentItems.slice(startIndex, startIndex + BATCH_SIZE);
 
       // Separate skippable code/symbol items if skipCodeOnly is enabled
       const itemsToTranslate: typeof batchSlice = [];
@@ -1716,6 +1873,37 @@ export default function App() {
               return updated;
             });
 
+            // Keep queue item and queue ref synchronized
+            if (currentFileId) {
+              setFileQueue((prev) => {
+                const nextQ = prev.map((f) => {
+                  if (f.id === currentFileId) {
+                    const mergedItems = f.items.map((it) => {
+                      const match = translationsList.find((tr) => tr.id === it.id);
+                      if (match) {
+                        let finalText = isRTL ? fixRTLPunctuation(match.text) : match.text;
+                        if (isRTL && appendRTLMarkers) {
+                          finalText = appendHiddenRTLMarker(finalText);
+                        }
+                        return { ...it, translatedText: finalText };
+                      }
+                      return it;
+                    });
+                    const trCount = mergedItems.filter((i) => i.translatedText && i.translatedText.trim()).length;
+                    return {
+                      ...f,
+                      items: mergedItems,
+                      translatedCount: trCount,
+                      currentBatch: b + 1,
+                    };
+                  }
+                  return f;
+                });
+                fileQueueRef.current = nextQ;
+                return nextQ;
+              });
+            }
+
             setTranslatedCount((prev) => prev + batchSlice.length);
             success = true;
             setRetryInfo(null);
@@ -1778,14 +1966,14 @@ export default function App() {
       isTranslatingRef.current = false;
 
       // Mark current queue file as completed
-      if (activeQueueFileId) {
-        setFileQueue((prev) =>
-          prev.map((f) =>
-            f.id === activeQueueFileId
+      if (currentFileId) {
+        setFileQueue((prev) => {
+          const nextQ = prev.map((f) =>
+            f.id === currentFileId
               ? {
                   ...f,
-                  status: 'completed',
-                  translatedCount: items.length,
+                  status: 'completed' as const,
+                  translatedCount: f.totalCount || currentItems.length,
                   tokenStats: {
                     promptTokens: tokenUsage.sessionPromptTokens,
                     candidatesTokens: tokenUsage.sessionCandidatesTokens,
@@ -1793,8 +1981,10 @@ export default function App() {
                   },
                 }
               : f
-          )
-        );
+          );
+          fileQueueRef.current = nextQ;
+          return nextQ;
+        });
       }
 
       if (!cancelTranslationRef.current) {
@@ -1803,7 +1993,7 @@ export default function App() {
         // Automatic Queue Advance: If autoAdvanceQueue is active and there are pending files in queue
         if (autoAdvanceQueue && fileQueueRef.current.length > 0) {
           const pending = fileQueueRef.current.find(
-            (f) => f.id !== activeQueueFileId && f.status === 'pending'
+            (f) => f.id !== currentFileId && f.status === 'pending'
           );
           if (pending) {
             showToast(
@@ -1815,14 +2005,16 @@ export default function App() {
 
             setTimeout(() => {
               activateQueueFile(pending);
-              setFileQueue((prev) =>
-                prev.map((f) => (f.id === pending.id ? { ...f, status: 'translating' } : f))
-              );
-              // Trigger translation on the next file
+              setFileQueue((prev) => {
+                const nextQ = prev.map((f) => (f.id === pending.id ? { ...f, status: 'translating' as const } : f));
+                fileQueueRef.current = nextQ;
+                return nextQ;
+              });
+              // Trigger translation on the next file explicitly passing its ID
               setTimeout(() => {
-                handleStartTranslation();
+                handleStartTranslation(pending.id);
               }, 400);
-            }, 1000);
+            }, 800);
           } else if (fileQueueRef.current.length > 1) {
             showToast(
               uiLang === 'en'
@@ -2151,6 +2343,7 @@ export default function App() {
             appendRTLMarkers={appendRTLMarkers}
             autoAdvance={autoAdvanceQueue}
             setAutoAdvance={handleSetAutoAdvanceQueue}
+            onGlobalBatchReplace={handleGlobalBatchReplace}
           />
         )}
 

@@ -1970,14 +1970,23 @@ function parseGeminiDiagnosticError(err: any): string {
     lowerMsg.includes('quota exceeded') ||
     lowerMsg.includes('rate limit');
 
+  const isHighDemand =
+    httpStatus === 503 ||
+    lowerMsg.includes('503') ||
+    lowerMsg.includes('high demand') ||
+    lowerMsg.includes('unavailable') ||
+    lowerMsg.includes('spikes in demand');
+
   const isAuthError =
-    httpStatus === 401 ||
-    httpStatus === 403 ||
-    structuredReasons.some((r) => r.includes('api_key_invalid') || r.includes('permission_denied') || r.includes('unauthorized')) ||
-    lowerMsg.includes('api key not valid') ||
-    lowerMsg.includes('api_key_invalid') ||
-    lowerMsg.includes('unauthorized') ||
-    lowerMsg.includes('permission denied');
+    !lowerMsg.includes('access_token_type_unsupported') && (
+      httpStatus === 401 ||
+      httpStatus === 403 ||
+      structuredReasons.some((r) => r.includes('api_key_invalid') || r.includes('permission_denied') || r.includes('unauthorized')) ||
+      lowerMsg.includes('api key not valid') ||
+      lowerMsg.includes('api_key_invalid') ||
+      lowerMsg.includes('unauthorized') ||
+      lowerMsg.includes('permission denied')
+    );
 
   const isBadRequest =
     httpStatus === 400 ||
@@ -1987,11 +1996,15 @@ function parseGeminiDiagnosticError(err: any): string {
     lowerMsg.includes('invalid_argument');
 
   if (isRateLimit) {
-    return 'محدودیت تعداد درخواست (Quota/Rate Limit): سهمیه مجاز این کلید به پایان رسیده است یا باید چند لحظه صبر کنید.';
+    return 'محدودیت تعداد درخواست در دقیقه (Rate Limit): کلید معتبر است ولی سهمیه چند ثانیه‌ای آن پر شده. با اندکی مکث یا سوئیچ کلید برطرف می‌شود.';
+  }
+
+  if (isHighDemand) {
+    return 'ترافیک بالای موقت در سرورهای گوگل (کد 503). کلید شما معتبر است و مدل‌های جایگزین به طور خودکار فعال می‌شوند.';
   }
 
   if (isAuthError) {
-    return 'کلید API خرابه یا نامعتبر است: کلید وارد شده اشتباه است، یا دسترسی آن از سوی گوگل مسدود گردیده.';
+    return 'کلید API نامعتبر است: کلید وارد شده اشتباه است یا دسترسی آن از سوی گوگل منقضی/مسدود گردیده (API_KEY_INVALID).';
   }
 
   // FIX (B20): request-content errors are reported as such — NOT as a broken key
@@ -2012,13 +2025,15 @@ function parseGeminiDiagnosticError(err: any): string {
   return `ارتباط برقرار نشد: ${msg}`;
 }
 
-// Helper to perform a fast, direct test on a single Gemini API key without retry delays
-// FIX (B20): the key is now validated with a FREE ListModels call (models.list) instead of
-// burning tokens on a hardcoded generateContent test. A 404 on the model list (or unknown
-// model names after a Google rename) no longer brands a healthy key as "failed" — the key is
-// reported as healthy-with-unknown-models and a live generateContent probe runs only as a
-// last resort.
-async function testSingleGeminiKey(keyStr: string): Promise<{ success: boolean; error?: string; healthyWithUnknownModels?: boolean }> {
+// Helper to perform a fast, direct test on a single Gemini API key across lightweight models
+async function testSingleGeminiKey(keyStr: string): Promise<{ 
+  success: boolean; 
+  error?: string; 
+  warning?: string; 
+  statusText?: 'valid' | 'busy' | 'quota'; 
+  healthyWithUnknownModels?: boolean;
+  modelTested?: string;
+}> {
   const cleanKey = String(keyStr || '').trim();
   if (!cleanKey) {
     return { success: false, error: 'کلید API خالی است.' };
@@ -2031,60 +2046,62 @@ async function testSingleGeminiKey(keyStr: string): Promise<{ success: boolean; 
     return { success: false, error: parseGeminiDiagnosticError(err) };
   }
 
-  // Attempt 1: free authenticated metadata call — no token cost at all
-  try {
-    const anyAi: any = ai;
-    if (typeof anyAi?.models?.list === 'function') {
-      const pager = await anyAi.models.list({ config: { pageSize: 5 } });
-      // Touching the iterator once proves authentication; we do not need the model names
-      for (const _m of pager as any) { break; }
-      return { success: true };
-    }
-  } catch (listErr: any) {
-    const listMsg = listErr?.message || String(listErr);
-    const lowerListMsg = listMsg.toLowerCase();
-
-    // 404 / NOT_FOUND on models.list still proves the KEY authenticated (google returns 401/403
-    // for bad keys, not 404) — the endpoint shape may just have changed.
-    const isAuthFailure =
-      lowerListMsg.includes('401') || lowerListMsg.includes('403') ||
-      lowerListMsg.includes('api key not valid') || lowerListMsg.includes('permission denied');
-    if (isAuthFailure) {
-      return { success: false, error: parseGeminiDiagnosticError(listErr) };
-    }
-    if (lowerListMsg.includes('404') || lowerListMsg.includes('not found')) {
-      return { success: true, healthyWithUnknownModels: true };
-    }
-    // Rate-limited keys are still VALID keys
-    if (lowerListMsg.includes('429') || lowerListMsg.includes('quota') || lowerListMsg.includes('resource_exhausted')) {
-      return { success: true };
-    }
-    // fall through to the generateContent probe below
-  }
-
-  // Attempt 2 (fallback): tiny live probe across the known model chain
-  const modelsToTest = ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.1-flash-lite'];
+  // Ultra-lightweight live probe across known fast & stable models
+  // 'gemini-3.6-flash' is fast and resilient against 503 load spikes
+  const modelsToTest = ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-3.5-flash'];
   let lastErr: any = null;
 
   for (const modelName of modelsToTest) {
     try {
       await ai.models.generateContent({
         model: modelName,
-        contents: 'Respond with OK',
+        contents: 'OK',
+        config: { maxOutputTokens: 1 },
       });
-      return { success: true };
+      return { success: true, modelTested: modelName, statusText: 'valid' };
     } catch (err: any) {
       lastErr = err;
       const msg = err?.message || String(err);
       const lowerMsg = msg.toLowerCase();
-      const is404 = msg.includes('404') || lowerMsg.includes('not found');
-      if (is404) continue; // Try fallback model if 404 — the key itself may still be fine
-      // FIX (B20): a 404 on ALL models means healthy-key-unknown-models, not a bad key
-      if (modelName === modelsToTest[modelsToTest.length - 1] && is404) {
-        return { success: true, healthyWithUnknownModels: true };
+
+      // If Google explicitly rejected the key as invalid/unauthorized, terminate immediately
+      const isAuthFailure =
+        lowerMsg.includes('api_key_invalid') ||
+        lowerMsg.includes('api key not valid') ||
+        lowerMsg.includes('permission_denied') ||
+        (err?.status === 400 && lowerMsg.includes('api key'));
+
+      if (isAuthFailure) {
+        return { success: false, error: parseGeminiDiagnosticError(err) };
       }
-      break; // For rate limit, auth errors, etc., stop immediately for diagnostic speed
+
+      // For 503 (high demand), 429 (rate limit), 404 (model unavailable), 500 (internal error):
+      // DO NOT break! Continue trying the fallback models in the chain
+      continue;
     }
+  }
+
+  // If all models failed to complete the probe, evaluate whether authentication passed
+  const lastMsg = (lastErr?.message || String(lastErr)).toLowerCase();
+  const isHighDemand = lastMsg.includes('503') || lastMsg.includes('high demand') || lastMsg.includes('unavailable');
+  const isRateLimit = lastMsg.includes('429') || lastMsg.includes('quota') || lastMsg.includes('resource_exhausted');
+
+  if (isHighDemand) {
+    // Authentication succeeded, but Google's models are under peak traffic load
+    return {
+      success: true,
+      statusText: 'busy',
+      warning: 'کلید تایید و معتبر شد، اما سرورهای گوگل در حال حاضر با ترافیک بالا (کد 503) روبرو هستند.',
+    };
+  }
+
+  if (isRateLimit) {
+    // Authentication succeeded, quota is temporarily pacing
+    return {
+      success: true,
+      statusText: 'quota',
+      warning: 'کلید معتبر است و هویت آن تایید شد (سهمیه مجاز درخواست در دقیقه موقتاً تکمیل است).',
+    };
   }
 
   return { success: false, error: parseGeminiDiagnosticError(lastErr) };
@@ -2112,7 +2129,13 @@ app.post('/api/test-key', async (req, res) => {
 
     const result = await testSingleGeminiKey(customKey);
     if (result.success) {
-      return res.json({ success: true, message: 'ارتباط برقرار شد و کلید API معتبر است.' });
+      return res.json({
+        success: true,
+        message: result.warning || 'ارتباط برقرار شد و کلید API معتبر است.',
+        warning: result.warning,
+        statusText: result.statusText || 'valid',
+        modelTested: result.modelTested,
+      });
     } else {
       return res.status(400).json({ success: false, error: result.error });
     }

@@ -5,7 +5,7 @@ export interface StoredApiKey {
   id: string;
   label: string;
   key: string;
-  status: 'valid' | 'invalid' | 'untested';
+  status: 'valid' | 'invalid' | 'untested' | 'busy';
   lastError?: string;
   isPrimary?: boolean;
 }

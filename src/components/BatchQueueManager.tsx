@@ -24,6 +24,7 @@ import JSZip from 'jszip';
 import { exportSubtitleFile, RTL_LANGUAGES, fixRTLPunctuation } from '../lib/subtitleParser';
 import { exportGameCSV, exportGameJSON, exportGameXLSX, exportGameTXT, appendHiddenRTLMarker } from '../lib/gameLocalizationParser';
 import { exportBilingualSubtitleFile } from '../lib/bilingualHelper';
+import { BatchFindReplaceModal, BatchReplaceOptions, BatchReplaceResult } from './BatchFindReplaceModal';
 
 interface BatchQueueManagerProps {
   queue: QueueFileItem[];
@@ -41,6 +42,11 @@ interface BatchQueueManagerProps {
   appendRTLMarkers?: boolean;
   autoAdvance: boolean;
   setAutoAdvance: (val: boolean) => void;
+  onGlobalBatchReplace: (
+    findText: string,
+    replaceText: string,
+    options: BatchReplaceOptions
+  ) => BatchReplaceResult;
 }
 
 export const BatchQueueManager: React.FC<BatchQueueManagerProps> = ({
@@ -59,8 +65,10 @@ export const BatchQueueManager: React.FC<BatchQueueManagerProps> = ({
   appendRTLMarkers = true,
   autoAdvance,
   setAutoAdvance,
+  onGlobalBatchReplace,
 }) => {
   const [isZipping, setIsZipping] = useState(false);
+  const [isFindReplaceOpen, setIsFindReplaceOpen] = useState(false);
   const t = TRANSLATIONS[uiLang];
 
   if (queue.length === 0) return null;
@@ -237,6 +245,17 @@ export const BatchQueueManager: React.FC<BatchQueueManagerProps> = ({
             <span>{uiLang === 'en' ? 'Add Files' : 'افزودن فایل'}</span>
           </button>
 
+          {/* Global Find & Replace in All Files */}
+          <button
+            type="button"
+            onClick={() => setIsFindReplaceOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 border border-indigo-200 dark:border-indigo-800 transition-colors shadow-2xs"
+            title={uiLang === 'en' ? 'Find & Replace phrase across all files in queue' : 'جستجو و جایگزینی یک عبارت در تمام فایل‌های صف بدون نیاز به باز کردن تکی'}
+          >
+            <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
+            <span>{uiLang === 'en' ? 'Replace in All Files' : 'جایگزینی در همه فایل‌ها'}</span>
+          </button>
+
           {/* Download all as ZIP */}
           {completedCount > 0 && (
             <button
@@ -335,33 +354,27 @@ export const BatchQueueManager: React.FC<BatchQueueManagerProps> = ({
 
                 {/* Status & Actions */}
                 <div className="flex items-center gap-2 shrink-0">
-                  {file.status === 'completed' && (
+                  {(file.status === 'completed' || (file.totalCount > 0 && file.translatedCount >= file.totalCount && file.status !== 'translating')) ? (
                     <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
                       <CheckCircle2 className="w-3 h-3 text-emerald-500" />
                       <span>{uiLang === 'en' ? '100%' : 'تکمیل'}</span>
                     </span>
-                  )}
-
-                  {file.status === 'translating' && (
+                  ) : file.status === 'translating' ? (
                     <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 flex items-center gap-1">
                       <Loader2 className="w-3 h-3 animate-spin text-amber-500" />
                       <span>{fileProgress}%</span>
                     </span>
-                  )}
-
-                  {file.status === 'pending' && (
+                  ) : file.status === 'pending' ? (
                     <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 border border-slate-200 dark:border-slate-700 flex items-center gap-1">
                       <Clock className="w-3 h-3 text-slate-400" />
                       <span>{uiLang === 'en' ? 'Queued' : 'در نوبت'}</span>
                     </span>
-                  )}
-
-                  {file.status === 'error' && (
+                  ) : file.status === 'error' ? (
                     <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20 flex items-center gap-1">
                       <AlertCircle className="w-3 h-3 text-rose-500" />
                       <span>{uiLang === 'en' ? 'Error' : 'خطا'}</span>
                     </span>
-                  )}
+                  ) : null}
 
                   {/* Single Download button for completed files */}
                   {(file.status === 'completed' || file.items.some((i) => i.translatedText)) && (
@@ -405,6 +418,14 @@ export const BatchQueueManager: React.FC<BatchQueueManagerProps> = ({
         })}
       </div>
 
+      {/* Batch Find & Replace Modal */}
+      <BatchFindReplaceModal
+        isOpen={isFindReplaceOpen}
+        onClose={() => setIsFindReplaceOpen(false)}
+        queue={queue}
+        onApplyReplace={onGlobalBatchReplace}
+        uiLang={uiLang}
+      />
     </div>
   );
 };

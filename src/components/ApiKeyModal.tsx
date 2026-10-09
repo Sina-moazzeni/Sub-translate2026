@@ -337,7 +337,15 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
         });
         const data = await res.json().catch(() => null);
         isSuccess = Boolean(res.ok && data?.success);
-        errorMessage = isSuccess ? undefined : (data?.error || 'کلید نامعتبر است یا سهمیه تمام شده.');
+        if (isSuccess) {
+          if (data?.statusText === 'busy' || data?.statusText === 'quota') {
+            errorMessage = data?.warning || 'کلید تایید شد (ترافیک موقت سرورهای گوگل بالا است).';
+          } else {
+            errorMessage = undefined;
+          }
+        } else {
+          errorMessage = data?.error || 'کلید نامعتبر است یا ارتباط با سرور برقرار نشد.';
+        }
       } else {
         const targetDef = AI_PROVIDERS_CONFIG[targetProvider] || AI_PROVIDERS_CONFIG.custom;
         const targetCfg = getProviderConfig(targetProvider);
@@ -371,11 +379,16 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
 
       // Save status safely to targetProvider without overwriting other tabs or newly added keys
       const fresh = getProviderKeys(targetProvider);
+      const isBusy = isSuccess && Boolean(errorMessage);
+      const computedStatus: 'valid' | 'invalid' | 'busy' = isSuccess
+        ? (isBusy ? 'busy' : 'valid')
+        : 'invalid';
+
       const updated = fresh.map((k) => {
         if (k.id === item.id) {
           return {
             ...k,
-            status: (isSuccess ? 'valid' : 'invalid') as 'valid' | 'invalid',
+            status: computedStatus,
             lastError: errorMessage,
           };
         }
@@ -704,7 +717,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
               </label>
               {currentTabKeys.length > 0 && (
                 <span className="text-[10px] font-mono bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-500/20 font-bold">
-                  {currentTabKeys.filter((k) => k.status === 'valid').length} معتبر
+                  {currentTabKeys.filter((k) => k.status === 'valid' || k.status === 'busy').length} فعال / معتبر
                 </span>
               )}
             </div>
@@ -817,10 +830,16 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                               VALID {latency ? `(${latency}ms)` : ''}
                             </span>
                           )}
+                          {item.status === 'busy' && (
+                            <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 flex items-center gap-1 font-mono" title={item.lastError}>
+                              <Activity className="w-2.5 h-2.5" />
+                              ACTIVE / BUSY {latency ? `(${latency}ms)` : ''}
+                            </span>
+                          )}
                           {item.status === 'invalid' && (
                             <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-rose-500/10 text-rose-600 dark:text-rose-400 flex items-center gap-1 font-mono">
                               <AlertCircle className="w-2.5 h-2.5" />
-                              EXHAUSTED / INVALID
+                              INVALID
                             </span>
                           )}
                         </div>
@@ -830,7 +849,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                         </span>
 
                         {item.lastError && (
-                          <span className="text-[10px] text-rose-600 dark:text-rose-400 mt-0.5 truncate">
+                          <span className={`text-[10px] mt-0.5 truncate ${item.status === 'busy' ? 'text-amber-600 dark:text-amber-400' : 'text-rose-600 dark:text-rose-400'}`}>
                             {item.lastError}
                           </span>
                         )}
