@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Folder, 
   FolderPlus, 
+  FolderOpen,
   Upload, 
   Download, 
   Play, 
@@ -21,6 +22,7 @@ import {
   Server, 
   RefreshCw, 
   ChevronRight,
+  ChevronLeft,
   Info,
   Layers,
   ChevronDown,
@@ -37,7 +39,12 @@ import {
   Globe,
   Sliders,
   Copy,
-  Plus
+  Plus,
+  ArrowRight,
+  ArrowLeft,
+  Search,
+  MoveRight,
+  ExternalLink
 } from 'lucide-react';
 import { SubtitleItem, SubtitleFormat, ToneOption } from '../types';
 import { parseSubtitleFile } from '../lib/subtitleParser';
@@ -128,6 +135,7 @@ interface FolderProjectManagerProps {
   onOpenProjectInEditor: (project: {
     id: string;
     name: string;
+    folderName?: string;
     items: SubtitleItem[];
     format: SubtitleFormat;
     rawHeader?: string;
@@ -143,9 +151,21 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
   const [folders, setFolders] = useState<ServerFolderItem[]>([]);
   const [selectedFolderId, setSelectedFolderId] = useState<string>('');
   const [projects, setProjects] = useState<ServerProjectItem[]>([]);
+  const [allProjects, setAllProjects] = useState<Array<ServerProjectItem & { folderName?: string }>>([]);
   const [loadingFolders, setLoadingFolders] = useState<boolean>(true);
   const [loadingProjects, setLoadingProjects] = useState<boolean>(false);
+  const [loadingAllProjects, setLoadingAllProjects] = useState<boolean>(false);
   
+  // Navigation View: 'folders_grid' (overview of all folders), 'inside_folder' (entered a folder), 'all_files' (all files with folder badges)
+  const [activeView, setActiveView] = useState<'folders_grid' | 'inside_folder' | 'all_files'>('folders_grid');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [isDragOver, setIsDragOver] = useState<boolean>(false);
+
+  // Move Project modal state
+  const [isMoveModalOpen, setIsMoveModalOpen] = useState(false);
+  const [movingProject, setMovingProject] = useState<(ServerProjectItem & { folderName?: string }) | null>(null);
+  const [targetMoveFolderId, setTargetMoveFolderId] = useState<string>('');
+
   // Background Worker status
   const [workerStatus, setWorkerStatus] = useState<WorkerStatusData | null>(null);
 
@@ -253,14 +273,27 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       const data = await res.json();
       if (data.success && Array.isArray(data.folders)) {
         setFolders(data.folders);
-        if (data.folders.length > 0 && !selectedFolderId) {
-          setSelectedFolderId(data.folders[0].id);
-        }
       }
     } catch (err) {
       console.error('Failed to fetch folders:', err);
     } finally {
       setLoadingFolders(false);
+    }
+  };
+
+  // Fetch all projects across all folders (for all_files view)
+  const fetchAllProjects = async () => {
+    try {
+      setLoadingAllProjects(true);
+      const res = await fetch('/api/projects');
+      const data = await res.json();
+      if (data.success && Array.isArray(data.projects)) {
+        setAllProjects(data.projects);
+      }
+    } catch (err) {
+      console.error('Failed to fetch all projects:', err);
+    } finally {
+      setLoadingAllProjects(false);
     }
   };
 
@@ -292,29 +325,42 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     } catch {}
   };
 
+  // Navigation: Enter into folder view
+  const handleEnterFolder = (folderId: string) => {
+    setSelectedFolderId(folderId);
+    setActiveView('inside_folder');
+    fetchProjects(folderId);
+  };
+
+  // Navigation: Return to folders grid
+  const handleBackToFolders = () => {
+    setActiveView('folders_grid');
+    setSelectedFolderId('');
+    fetchFolders();
+  };
+
   // Initial load
   useEffect(() => {
     fetchFolders();
+    fetchAllProjects();
     fetchWorkerStatus();
     fetchServerKeys();
     fetchServerInfo();
     fetchServerConfig();
   }, []);
 
-  // When selected folder changes
+  // When selected folder changes and we are inside a folder
   useEffect(() => {
-    if (selectedFolderId) {
+    if (selectedFolderId && activeView === 'inside_folder') {
       fetchProjects(selectedFolderId);
-    } else {
-      setProjects([]);
     }
-  }, [selectedFolderId]);
+  }, [selectedFolderId, activeView]);
 
   // Polling for live translation updates
   useEffect(() => {
     const interval = setInterval(() => {
       fetchWorkerStatus();
-      if (selectedFolderId) {
+      if (selectedFolderId && activeView === 'inside_folder') {
         fetch(`/api/folders/${selectedFolderId}/projects`)
           .then((res) => res.json())
           .then((data) => {
@@ -332,12 +378,22 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
           }
         })
         .catch(() => {});
+      if (activeView === 'all_files') {
+        fetch('/api/projects')
+          .then((res) => res.json())
+          .then((data) => {
+            if (data.success && Array.isArray(data.projects)) {
+              setAllProjects(data.projects);
+            }
+          })
+          .catch(() => {});
+      }
     }, 2500);
 
     return () => clearInterval(interval);
-  }, [selectedFolderId]);
+  }, [selectedFolderId, activeView]);
 
-  // Create Folder Handler
+  // Create Folder Handler: Automatically enters the new folder
   const handleCreateFolder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newFolderName.trim()) {
@@ -355,10 +411,11 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       if (data.success && data.folder) {
         setFolders((prev) => [...prev, { ...data.folder, projectCount: 0, completedCount: 0 }]);
         setSelectedFolderId(data.folder.id);
+        setActiveView('inside_folder');
         setNewFolderName('');
         setNewFolderDesc('');
         setIsNewFolderOpen(false);
-        onShowToast(`پوشه "${data.folder.name}" ساخته شد.`, 'success');
+        onShowToast(`پوشه "${data.folder.name}" ساخته شد و وارد آن شدید. اکنون فایل‌های زیرنویس را آپلود کنید.`, 'success');
       }
     } catch {
       onShowToast('خطا در ایجاد پوشه', 'error');
@@ -401,8 +458,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       if (data.success) {
         setFolders((prev) => prev.filter((f) => f.id !== folderId));
         if (selectedFolderId === folderId) {
-          const remaining = folders.filter((f) => f.id !== folderId);
-          setSelectedFolderId(remaining.length > 0 ? remaining[0].id : '');
+          handleBackToFolders();
         }
         onShowToast(`پوشه "${folderName}" حذف شد.`, 'info');
       }
@@ -411,10 +467,12 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     }
   };
 
-  // Handle Multi-file Upload into Folder
-  const handleFilesUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
+  // Process & Upload files into the target folder
+  const processAndUploadFiles = async (files: FileList | File[]) => {
     if (!files || files.length === 0 || !selectedFolderId) return;
+
+    const targetFolder = folders.find((f) => f.id === selectedFolderId);
+    const folderName = targetFolder?.name || 'پوشه';
 
     setIsUploading(true);
     const parsedFilesData: Array<{
@@ -460,9 +518,10 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
 
       const data = await res.json();
       if (data.success) {
-        onShowToast(`تعداد ${data.count} فایل زیرنویس با موفقیت به پوشه اضافه شد.`, 'success');
+        onShowToast(`تعداد ${data.count} فایل زیرنویس با موفقیت به پوشه «${folderName}» اضافه شد.`, 'success');
         await fetchProjects(selectedFolderId);
         await fetchFolders();
+        await fetchAllProjects();
       } else {
         onShowToast(data.error || 'خطا در آپلود فایل‌ها به سرور', 'error');
       }
@@ -472,6 +531,66 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  // Handle Multi-file Upload into Folder via File Picker
+  const handleFilesUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (files && files.length > 0) {
+      await processAndUploadFiles(files);
+    }
+  };
+
+  // Drag and drop handlers for in-folder upload
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+  };
+
+  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      await processAndUploadFiles(files);
+    }
+  };
+
+  // Move project to another folder handler
+  const handleMoveProjectSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!movingProject || !targetMoveFolderId) {
+      onShowToast('لطفاً پوشه مقصد را انتخاب کنید.', 'error');
+      return;
+    }
+    try {
+      const res = await fetch(`/api/projects/${movingProject.id}/move`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetFolderId: targetMoveFolderId }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || 'فایل با موفقیت به پوشه مقصد انتقال یافت.', 'success');
+        setIsMoveModalOpen(false);
+        setMovingProject(null);
+        if (selectedFolderId) await fetchProjects(selectedFolderId);
+        await fetchFolders();
+        await fetchAllProjects();
+      } else {
+        onShowToast(data.error || 'خطا در انتقال فایل', 'error');
+      }
+    } catch {
+      onShowToast('خطا در انتقال فایل', 'error');
     }
   };
 
@@ -917,450 +1036,928 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
         </div>
       )}
 
-      {/* Main Grid: Folders Sidebar & Subtitles Content */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        
-        {/* Left Column: Folders List (4 cols) */}
-        <div className="lg:col-span-4 flex flex-col gap-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
-              <Folder className="w-4 h-4 text-indigo-400" />
-              <span>پوشه‌بندی زیرنویس‌ها</span>
-              <span className="text-xs text-slate-400 font-mono">({folders.length})</span>
-            </h3>
+      {/* Navigation Bar & Breadcrumb Controls */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-slate-900/80 border border-slate-800 rounded-2xl p-3.5 px-4">
+        {/* Breadcrumb Trail */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {activeView === 'inside_folder' && selectedFolder ? (
+            <>
+              <button
+                type="button"
+                onClick={handleBackToFolders}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 border border-indigo-500/30 transition-all shadow-xs"
+              >
+                <ArrowRight className="w-3.5 h-3.5" />
+                <span>بازگشت به همه پوشه‌ها</span>
+              </button>
 
-            <button
-              type="button"
-              onClick={() => setIsNewFolderOpen(true)}
-              className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors shadow-xs"
-            >
-              <FolderPlus className="w-3.5 h-3.5" />
-              <span>پوشه جدید</span>
-            </button>
-          </div>
+              <span className="text-slate-600">/</span>
 
-          {/* Folders List Container */}
-          <div className="flex flex-col gap-2 max-h-[500px] overflow-y-auto pr-1">
-            {loadingFolders ? (
-              <div className="py-12 flex items-center justify-center text-slate-400 text-xs">
-                <Loader2 className="w-4 h-4 animate-spin ml-2" />
-                در حال بارگذاری پوشه‌ها...
-              </div>
-            ) : folders.length === 0 ? (
-              <div className="py-8 text-center text-slate-500 text-xs bg-slate-900/40 rounded-xl border border-slate-800 p-4">
-                هنوز هیچ پوشه‌ای ایجاد نشده است.
-              </div>
-            ) : (
-              folders.map((folder) => {
-                const isSelected = folder.id === selectedFolderId;
-                return (
-                  <div
-                    key={folder.id}
-                    onClick={() => setSelectedFolderId(folder.id)}
-                    className={`p-3 rounded-xl border transition-all cursor-pointer flex flex-col gap-1.5 ${
-                      isSelected
-                        ? 'bg-indigo-600/15 border-indigo-500/50 shadow-md shadow-indigo-950/30'
-                        : 'bg-slate-900/60 border-slate-800/80 hover:border-slate-700 hover:bg-slate-900'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <Folder className={`w-4 h-4 ${isSelected ? 'text-indigo-400' : 'text-slate-400'}`} />
-                        <span className={`text-xs font-bold truncate max-w-[180px] ${isSelected ? 'text-white' : 'text-slate-200'}`}>
-                          {folder.name}
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-300">
-                          {folder.completedCount || 0} / {folder.projectCount || 0}
-                        </span>
-
-                        {isSelected && (
-                          <div className="flex items-center gap-1">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setEditFolderName(folder.name);
-                                setEditFolderDesc(folder.description || '');
-                                setIsEditFolderOpen(true);
-                              }}
-                              className="p-1 hover:text-indigo-400 text-slate-400 transition-colors"
-                              title="ویرایش نام پوشه"
-                            >
-                              <Edit3 className="w-3 h-3" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleDeleteFolder(folder.id, folder.name);
-                              }}
-                              className="p-1 hover:text-rose-400 text-slate-400 transition-colors"
-                              title="حذف پوشه"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    {folder.description && (
-                      <p className="text-[11px] text-slate-400 line-clamp-1">{folder.description}</p>
-                    )}
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-
-        {/* Right Column: Projects & Subtitle Files in Selected Folder (8 cols) */}
-        <div className="lg:col-span-8 flex flex-col gap-4">
-          {selectedFolder ? (
-            <div className="bg-slate-900/60 rounded-2xl border border-slate-800 p-4 lg:p-5 flex flex-col gap-5">
-              
-              {/* Folder Header Actions */}
-              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
-                <div>
-                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    <Folder className="w-4 h-4 text-indigo-400" />
-                    <span>{selectedFolder.name}</span>
-                    <span className="text-xs text-slate-400 font-mono">({projects.length} زیرنویس)</span>
-                  </h3>
-                  {selectedFolder.description && (
-                    <p className="text-xs text-slate-400 mt-1">{selectedFolder.description}</p>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-2 shrink-0 flex-wrap">
-                  {/* Start Folder Background Translation */}
-                  <button
-                    type="button"
-                    onClick={handleStartFolder}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 transition-all"
-                    title="شروع ترجمه خودکار تمام فایل‌های این پوشه در پس‌زمینه سرور"
-                  >
-                    <Play className="w-3.5 h-3.5 fill-current" />
-                    <span>شروع ترجمه</span>
-                  </button>
-
-                  {/* Resume Incomplete in Folder */}
-                  <button
-                    type="button"
-                    onClick={handleResumeFolder}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 transition-colors"
-                    title="ادامه ترجمه سطرهای باقی‌مانده تمام فایل‌های ناقص پوشه"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    <span>ادامه فایل‌های ناقص</span>
-                  </button>
-
-                  {/* Pause Folder Translation */}
-                  <button
-                    type="button"
-                    onClick={handlePauseFolder}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-colors"
-                    title="توقف موقت ترجمه این پوشه"
-                  >
-                    <Pause className="w-3.5 h-3.5" />
-                    <span>توقف موقت</span>
-                  </button>
-
-                  {/* One-click Bulk VTT Download (ZIP) */}
-                  <button
-                    type="button"
-                    onClick={handleDownloadFolderVTTZip}
-                    disabled={isZippingFolder || projects.length === 0}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 shadow-md shadow-emerald-600/30 transition-all"
-                    title="دانلود یک‌جای تمام زیرنویس‌های این پوشه با فرمت WebVTT (.vtt) در قالب فایل ZIP"
-                  >
-                    {isZippingFolder ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5" />}
-                    <span>خروجی گروهی VTT (ZIP)</span>
-                  </button>
-                </div>
+              <div className="flex items-center gap-1.5 text-xs text-white font-bold bg-slate-950 px-3 py-1 rounded-xl border border-slate-800">
+                <FolderOpen className="w-3.5 h-3.5 text-amber-400" />
+                <span>{selectedFolder.name}</span>
+                <span className="text-[10px] text-slate-400 font-mono">({projects.length} فایل)</span>
               </div>
 
-              {/* Upload to Folder Box */}
-              <div className="bg-slate-950/70 rounded-xl border border-dashed border-indigo-500/40 p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-indigo-500/10 text-indigo-400 flex items-center justify-center shrink-0">
-                    <Upload className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-white">آپلود گروهی زیرنویس‌ها به این پوشه</h4>
-                    <p className="text-[11px] text-slate-400 mt-0.5">پشتیبانی از فرمت‌های SRT, VTT, ASS, SSA, SUB (انتخاب چندتایی همزمان)</p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3 shrink-0">
-                  <label className="flex items-center gap-1.5 text-[11px] text-slate-300 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={autoQueueOnUpload}
-                      onChange={(e) => setAutoQueueOnUpload(e.target.checked)}
-                      className="rounded text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5"
-                    />
-                    <span>شروع خودکار پس از آپلود</span>
-                  </label>
-
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    accept=".srt,.vtt,.ass,.ssa,.sub"
-                    onChange={handleFilesUpload}
-                    className="hidden"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={isUploading}
-                    className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 transition-colors shadow-sm"
-                  >
-                    {isUploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
-                    <span>انتخاب فایل‌ها</span>
-                  </button>
-                </div>
+              <div className="hidden lg:flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-[11px]">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                <span>داخل پوشه: «{selectedFolder.name}»</span>
               </div>
-
-              {/* Subtitle Files List in Folder */}
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center justify-between text-xs text-slate-400 px-1">
-                  <span>فایل‌های زیرنویس ({projects.length})</span>
-                  <span>تایم‌بندی اصلی ۱۰۰٪ محفوظ می‌ماند</span>
-                </div>
-
-                {loadingProjects ? (
-                  <div className="py-12 flex items-center justify-center text-slate-400 text-xs">
-                    <Loader2 className="w-4 h-4 animate-spin ml-2" />
-                    در حال بارگذاری فایل‌ها...
-                  </div>
-                ) : projects.length === 0 ? (
-                  <div className="py-12 text-center text-slate-500 text-xs border border-dashed border-slate-800 rounded-xl">
-                    این پوشه خالی است. زیرنویس‌های خود (نظیر قسمت‌های سریال) را در باکس بالا آپلود کنید.
-                  </div>
-                ) : (
-                  <div className="flex flex-col gap-3 max-h-[480px] overflow-y-auto pr-1">
-                    {projects.map((proj) => {
-                      const isComplete = proj.status === 'completed' || (proj.totalCues > 0 && proj.translatedCues >= proj.totalCues);
-                      const isTranslating = proj.status === 'translating';
-                      const isQueued = proj.status === 'queued';
-                      const isWaitingKeys = proj.status === 'waiting_for_keys';
-                      const isIncomplete = proj.status === 'has_incomplete';
-                      const isError = proj.status === 'error';
-                      const pct = proj.totalCues > 0 ? Math.round((proj.translatedCues / proj.totalCues) * 100) : 0;
-
-                      return (
-                        <div
-                          key={proj.id}
-                          className="bg-slate-950/70 rounded-xl border border-slate-800/90 hover:border-slate-700 p-3.5 flex flex-col gap-2.5 transition-all shadow-xs"
-                        >
-                          <div className="flex items-center justify-between gap-3 flex-wrap">
-                            <div className="flex items-center gap-2.5 overflow-hidden">
-                              <FileText className="w-4 h-4 text-indigo-400 shrink-0" />
-                              <div className="flex flex-col">
-                                <span className="font-bold text-xs text-white truncate max-w-[280px] sm:max-w-[360px]">
-                                  {proj.name}
-                                </span>
-                                <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono mt-0.5">
-                                  <span>{proj.format.toUpperCase()}</span>
-                                  <span>•</span>
-                                  <span className={isIncomplete ? 'text-amber-400 font-bold' : ''}>
-                                    {proj.translatedCues} / {proj.totalCues} سطر
-                                  </span>
-                                  {proj.tokenUsage?.totalTokens > 0 && (
-                                    <>
-                                      <span>•</span>
-                                      <span>{proj.tokenUsage.totalTokens.toLocaleString()} توکن</span>
-                                    </>
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Status Badges & Action Buttons */}
-                            <div className="flex items-center gap-2 shrink-0 flex-wrap">
-                              {/* Status Badge */}
-                              {isComplete ? (
-                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
-                                  <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                                  <span>تکمیل (۱۰۰٪)</span>
-                                </span>
-                              ) : isTranslating ? (
-                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center gap-1 animate-pulse">
-                                  <Loader2 className="w-3 h-3 animate-spin text-amber-400" />
-                                  <span>در حال ترجمه ({pct}%)</span>
-                                </span>
-                              ) : isWaitingKeys ? (
-                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30 flex items-center gap-1">
-                                  <Clock className="w-3 h-3 text-purple-400" />
-                                  <span>در انتظار کلید/سهمیه ({pct}%)</span>
-                                </span>
-                              ) : isIncomplete ? (
-                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 flex items-center gap-1">
-                                  <AlertCircle className="w-3 h-3 text-amber-400" />
-                                  <span>ترجمه ناقص ({pct}%)</span>
-                                </span>
-                              ) : isQueued ? (
-                                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 flex items-center gap-1">
-                                  <Clock className="w-3 h-3 text-slate-400" />
-                                  <span>در صف سرور</span>
-                                </span>
-                              ) : (
-                                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
-                                  متوقف
-                                </span>
-                              )}
-
-                              {/* Resume Button (for incomplete or waiting) */}
-                              {(isIncomplete || isWaitingKeys || proj.status === 'paused') && !isTranslating && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleResumeProject(proj.id, proj.name)}
-                                  className="flex items-center gap-1 px-2 py-1 text-[11px] font-bold text-emerald-300 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 rounded-lg transition-colors"
-                                  title="ادامه ترجمه از سطر باقی‌مانده (بدون اتلاف سطرهای قبلی)"
-                                >
-                                  <Play className="w-3 h-3 fill-current" />
-                                  <span>ادامه ترجمه</span>
-                                </button>
-                              )}
-
-                              {/* Retranslate Incomplete Only */}
-                              {isIncomplete && !isTranslating && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleRestartProject(proj.id, proj.name, true)}
-                                  className="flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-amber-300 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 rounded-lg transition-colors"
-                                  title="ترجمه مجدد سطرهای ناقص و ترجمه‌نشده با حفظ سطرهای سالم"
-                                >
-                                  <RotateCcw className="w-3 h-3" />
-                                  <span>تکمیل سطرهای باقی‌مانده</span>
-                                </button>
-                              )}
-
-                              {/* Retranslate All From Scratch */}
-                              {isComplete && !isTranslating && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleRestartProject(proj.id, proj.name, false)}
-                                  className="p-1.5 text-slate-400 hover:text-amber-300 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors text-[11px]"
-                                  title="ترجمه مجدد کل زیرنویس از ابتدا"
-                                >
-                                  <RotateCcw className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-
-                              {/* Start/Pause Single */}
-                              {!isTranslating && !isIncomplete && !isWaitingKeys && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleStartProject(proj.id, proj.name)}
-                                  disabled={isComplete}
-                                  className="p-1.5 text-slate-300 hover:text-indigo-400 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors disabled:opacity-30"
-                                  title="شروع ترجمه در پس‌زمینه"
-                                >
-                                  <Play className="w-3.5 h-3.5 fill-current" />
-                                </button>
-                              )}
-
-                              {isTranslating && (
-                                <button
-                                  type="button"
-                                  onClick={() => handlePauseProject(proj.id, proj.name)}
-                                  className="p-1.5 text-amber-400 hover:text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 rounded-lg transition-colors"
-                                  title="توقف موقت ترجمه"
-                                >
-                                  <Pause className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-
-                              {/* Single VTT Download */}
-                              <a
-                                href={`/api/projects/${proj.id}/export/vtt`}
-                                download
-                                className="p-1.5 text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 rounded-lg transition-colors flex items-center gap-1 text-[11px] font-semibold"
-                                title="دانلود فایل با فرمت WebVTT (.vtt)"
-                              >
-                                <Download className="w-3.5 h-3.5" />
-                                <span>VTT</span>
-                              </a>
-
-                              {/* Open in Full Virtualized Editor */}
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  onOpenProjectInEditor({
-                                    id: proj.id,
-                                    name: proj.name,
-                                    items: proj.items,
-                                    format: proj.format as SubtitleFormat,
-                                    rawHeader: proj.rawHeader,
-                                  })
-                                }
-                                className="p-1.5 text-slate-300 hover:text-indigo-400 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
-                                title="مشاهده و ویرایش در ادیتور مجازی سریع"
-                              >
-                                <Eye className="w-3.5 h-3.5" />
-                              </button>
-
-                              {/* Delete Project */}
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteProject(proj.id, proj.name)}
-                                className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors"
-                                title="حذف این زیرنویس"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          </div>
-
-                          {/* Diagnostic Info Box if lastError occurred */}
-                          {proj.lastError && (
-                            <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-2.5 text-[11px] text-amber-200 flex items-start gap-2">
-                              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                              <div className="flex flex-col gap-0.5">
-                                <span className="font-bold text-amber-300">گزارش وضعیت و خطا:</span>
-                                <span>{proj.lastError}</span>
-                                <span className="text-emerald-400 font-semibold text-[10px] mt-0.5">
-                                  ✓ سطرهای ترجمه شده تا به اینجا ({proj.translatedCues} سطر) در دیتابیس سرور کاملاً محفوظ است.
-                                </span>
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Progress bar */}
-                          <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                            <div
-                              className={`h-full rounded-full transition-all duration-300 ${
-                                isComplete
-                                  ? 'bg-emerald-500'
-                                  : isIncomplete
-                                  ? 'bg-amber-500'
-                                  : isWaitingKeys
-                                  ? 'bg-purple-500'
-                                  : 'bg-indigo-500'
-                              }`}
-                              style={{ width: `${pct}%` }}
-                            />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
+            </>
           ) : (
-            <div className="bg-slate-900/60 rounded-2xl border border-slate-800 p-12 text-center text-slate-400 text-xs">
-              یک پوشه از لیست سمت راست انتخاب کنید یا پوشه جدید بسازید.
+            <div className="flex items-center gap-2">
+              <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setActiveView('folders_grid')}
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                    activeView === 'folders_grid'
+                      ? 'bg-indigo-600 text-white shadow-xs'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Folder className="w-3.5 h-3.5" />
+                  <span>پوشه‌ها ({folders.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveView('all_files');
+                    fetchAllProjects();
+                  }}
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                    activeView === 'all_files'
+                      ? 'bg-indigo-600 text-white shadow-xs'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>تمام فایل‌ها ({allProjects.length})</span>
+                </button>
+              </div>
             </div>
           )}
         </div>
+
+        {/* Search and Action Buttons */}
+        <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+          <div className="relative w-full sm:w-56">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder={
+                activeView === 'inside_folder'
+                  ? 'جستجو در این پوشه...'
+                  : activeView === 'all_files'
+                  ? 'جستجو در تمام زیرنویس‌ها...'
+                  : 'جستجو در نام پوشه‌ها...'
+              }
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl pr-8 pl-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setIsNewFolderOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors shadow-xs shrink-0"
+          >
+            <FolderPlus className="w-3.5 h-3.5" />
+            <span>پوشه جدید</span>
+          </button>
+        </div>
       </div>
+
+      {/* VIEW 1: FOLDERS OVERVIEW GRID (روی پوشه کلیک کنید تا وارد آن شوید) */}
+      {activeView === 'folders_grid' && (
+        <div className="flex flex-col gap-5">
+          {/* Summary Stat Cards */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3.5">
+            <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-3.5 flex flex-col gap-1">
+              <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1">
+                <Folder className="w-3.5 h-3.5 text-indigo-400" />
+                <span>تعداد کل پوشه‌ها</span>
+              </span>
+              <span className="text-xl font-bold text-white font-mono">{folders.length}</span>
+            </div>
+
+            <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-3.5 flex flex-col gap-1">
+              <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1">
+                <FileText className="w-3.5 h-3.5 text-cyan-400" />
+                <span>کل زیرنویس‌های ثبت‌شده</span>
+              </span>
+              <span className="text-xl font-bold text-white font-mono">
+                {folders.reduce((acc, f) => acc + (f.projectCount || 0), 0)}
+              </span>
+            </div>
+
+            <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-3.5 flex flex-col gap-1">
+              <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                <span>فایل‌های تکمیل شده</span>
+              </span>
+              <span className="text-xl font-bold text-emerald-400 font-mono">
+                {folders.reduce((acc, f) => acc + (f.completedCount || 0), 0)}
+              </span>
+            </div>
+
+            <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-3.5 flex flex-col gap-1">
+              <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1">
+                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                <span>مدل هوش مصنوعی</span>
+              </span>
+              <span className="text-xs font-bold text-amber-300 font-mono mt-1 truncate">Gemini 3.5 Flash Lite</span>
+            </div>
+          </div>
+
+          {/* Folders Cards Grid */}
+          {loadingFolders ? (
+            <div className="py-20 flex flex-col items-center justify-center text-slate-400 text-xs gap-3">
+              <Loader2 className="w-6 h-6 animate-spin text-indigo-400" />
+              <span>در حال بارگذاری پوشه‌ها...</span>
+            </div>
+          ) : folders.length === 0 ? (
+            <div className="py-16 text-center text-slate-400 text-xs bg-slate-900/40 rounded-2xl border border-dashed border-slate-800 p-8 flex flex-col items-center gap-3">
+              <FolderPlus className="w-10 h-10 text-indigo-400/50" />
+              <div className="font-bold text-slate-300 text-sm">هنوز هیچ پوشه‌ای ایجاد نشده است</div>
+              <p className="max-w-md text-slate-400">
+                برای شروع ترجمه گروهی، ابتدا یک پوشه جدید بسازید (مانند «افشای کیهانی فصل اول»)، سپس وارد پوشه شده و فایل‌های خود را آپلود کنید.
+              </p>
+              <button
+                type="button"
+                onClick={() => setIsNewFolderOpen(true)}
+                className="mt-2 px-4 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white shadow-md transition-colors flex items-center gap-1.5"
+              >
+                <FolderPlus className="w-4 h-4" />
+                <span>ایجاد اولین پوشه</span>
+              </button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {folders
+                .filter((f) => !searchQuery.trim() || f.name.toLowerCase().includes(searchQuery.toLowerCase()))
+                .map((folder) => {
+                  const pct = folder.projectCount > 0 ? Math.round((folder.completedCount / folder.projectCount) * 100) : 0;
+                  return (
+                    <div
+                      key={folder.id}
+                      onClick={() => handleEnterFolder(folder.id)}
+                      className="group bg-slate-900/80 hover:bg-slate-900 border border-slate-800 hover:border-indigo-500/50 rounded-2xl p-4 flex flex-col justify-between gap-4 transition-all duration-200 cursor-pointer shadow-md hover:shadow-indigo-950/30"
+                    >
+                      <div className="flex flex-col gap-2.5">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-center gap-2.5">
+                            <div className="w-10 h-10 rounded-xl bg-indigo-600/15 group-hover:bg-indigo-600/25 border border-indigo-500/30 flex items-center justify-center text-indigo-400 group-hover:text-indigo-300 transition-colors shrink-0">
+                              <Folder className="w-5 h-5" />
+                            </div>
+                            <div>
+                              <h4 className="text-sm font-bold text-white group-hover:text-indigo-300 transition-colors line-clamp-1">
+                                {folder.name}
+                              </h4>
+                              <span className="text-[11px] text-slate-400 font-mono">
+                                {folder.projectCount} فایل زیرنویس
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Quick Card Menu */}
+                          <div
+                            className="flex items-center gap-1 shrink-0"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditFolderName(folder.name);
+                                setEditFolderDesc(folder.description || '');
+                                setSelectedFolderId(folder.id);
+                                setIsEditFolderOpen(true);
+                              }}
+                              className="p-1.5 text-slate-400 hover:text-indigo-300 hover:bg-slate-800 rounded-lg transition-colors"
+                              title="ویرایش نام پوشه"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteFolder(folder.id, folder.name)}
+                              className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors"
+                              title="حذف پوشه"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {folder.description && (
+                          <p className="text-xs text-slate-400 line-clamp-2 leading-relaxed">
+                            {folder.description}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="flex flex-col gap-2 pt-3 border-t border-slate-800/80">
+                        <div className="flex items-center justify-between text-[11px] text-slate-400">
+                          <span>پیشرفت ترجمه</span>
+                          <span className="font-mono text-white font-semibold">
+                            {folder.completedCount} از {folder.projectCount} ({pct}%)
+                          </span>
+                        </div>
+
+                        <div className="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all duration-300 ${
+                              pct === 100 ? 'bg-emerald-500' : 'bg-indigo-500'
+                            }`}
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+
+                        {/* ENTER FOLDER BUTTON */}
+                        <div className="flex items-center justify-between mt-1 pt-1">
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            {new Date(folder.createdAt).toLocaleDateString('fa-IR')}
+                          </span>
+
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleEnterFolder(folder.id);
+                            }}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-indigo-600 group-hover:bg-indigo-500 shadow-md shadow-indigo-600/20 transition-all"
+                          >
+                            <FolderOpen className="w-3.5 h-3.5" />
+                            <span>ورود به پوشه</span>
+                            <ArrowLeft className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* VIEW 2: INSIDE FOLDER VIEW (ورود به داخل پوشه + آپلود مستقیم + مدیریت زیرنویس‌های این پوشه) */}
+      {activeView === 'inside_folder' && selectedFolder && (
+        <div className="flex flex-col gap-6 animate-fade-in">
+          {/* Folder Header Information Card */}
+          <div className="bg-gradient-to-r from-slate-900 via-slate-900 to-indigo-950/40 rounded-2xl border border-indigo-500/30 p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-lg shadow-indigo-950/20">
+            <div className="flex items-center gap-3.5">
+              <div className="w-12 h-12 rounded-2xl bg-indigo-600/20 border border-indigo-500/40 text-amber-400 flex items-center justify-center shrink-0 shadow-inner">
+                <FolderOpen className="w-6 h-6" />
+              </div>
+              <div className="flex flex-col">
+                <div className="flex items-center gap-2.5 flex-wrap">
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <span>{selectedFolder.name}</span>
+                  </h3>
+                  <span className="text-xs font-mono font-bold px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                    {projects.length} زیرنویس در این پوشه
+                  </span>
+                </div>
+                {selectedFolder.description ? (
+                  <p className="text-xs text-slate-300 mt-1 leading-relaxed">{selectedFolder.description}</p>
+                ) : (
+                  <p className="text-xs text-slate-400 mt-1">پوشه اختصاصی برای نگهداری و ترجمه فایل‌های این دسته‌بندی</p>
+                )}
+              </div>
+            </div>
+
+            {/* Folder Actions Toolbar */}
+            <div className="flex items-center gap-2 shrink-0 flex-wrap w-full md:w-auto justify-end">
+              {/* Start All in Folder */}
+              <button
+                type="button"
+                onClick={handleStartFolder}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 transition-all"
+                title="شروع ترجمه خودکار تمام فایل‌های این پوشه در پس‌زمینه سرور"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+                <span>شروع ترجمه پوشه</span>
+              </button>
+
+              {/* Resume Incomplete */}
+              <button
+                type="button"
+                onClick={handleResumeFolder}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 transition-colors"
+                title="ادامه ترجمه سطرهای باقی‌مانده تمام فایل‌های ناقص پوشه"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>ادامه فایل‌های ناقص</span>
+              </button>
+
+              {/* Pause Folder */}
+              <button
+                type="button"
+                onClick={handlePauseFolder}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-colors"
+                title="توقف موقت ترجمه این پوشه"
+              >
+                <Pause className="w-3.5 h-3.5" />
+                <span>توقف موقت</span>
+              </button>
+
+              {/* Bulk VTT ZIP Download */}
+              <button
+                type="button"
+                onClick={handleDownloadFolderVTTZip}
+                disabled={isZippingFolder || projects.length === 0}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 shadow-md shadow-emerald-600/30 transition-all"
+                title="دانلود تمام زیرنویس‌های این پوشه با فرمت WebVTT (.vtt) در قالب یک فایل ZIP"
+              >
+                {isZippingFolder ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5" />}
+                <span>خروجی گروهی VTT (ZIP)</span>
+              </button>
+
+              {/* Edit Folder Name */}
+              <button
+                type="button"
+                onClick={() => {
+                  setEditFolderName(selectedFolder.name);
+                  setEditFolderDesc(selectedFolder.description || '');
+                  setIsEditFolderOpen(true);
+                }}
+                className="p-2 rounded-xl text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-800 border border-slate-700 transition-colors"
+                title="ویرایش نام و توضیحات پوشه"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+
+          {/* DEDICATED IN-FOLDER UPLOAD ZONE (آپلود مستقیم در پوشه) */}
+          <div
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={`rounded-2xl border-2 border-dashed p-6 flex flex-col items-center justify-center gap-4 transition-all ${
+              isDragOver
+                ? 'bg-indigo-600/20 border-indigo-400 shadow-xl shadow-indigo-600/20 scale-[1.01]'
+                : 'bg-slate-900/60 border-indigo-500/40 hover:border-indigo-500/70 hover:bg-slate-900/80'
+            }`}
+          >
+            <div className="flex flex-col items-center text-center gap-2 max-w-xl">
+              <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-indigo-600 to-violet-500 text-white flex items-center justify-center shadow-lg shadow-indigo-500/30">
+                <UploadCloud className="w-7 h-7" />
+              </div>
+
+              <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                <span>آپلود فایل‌های زیرنویس در پوشه</span>
+                <span className="text-amber-400">«{selectedFolder.name}»</span>
+              </h4>
+
+              <p className="text-xs text-slate-300 leading-relaxed">
+                تمام فایل‌هایی که اینجا رها کنید یا انتخاب نمایید، به صورت اختصاصی برای پوشه <span className="text-indigo-300 font-bold">«{selectedFolder.name}»</span> ثبت شده و در دیتابیس سرور ذخیره می‌شوند.
+              </p>
+
+              <div className="flex items-center gap-2 flex-wrap justify-center text-[10px] font-mono text-slate-400">
+                <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300">SRT</span>
+                <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300">VTT</span>
+                <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300">ASS</span>
+                <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300">SSA</span>
+                <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300">SUB</span>
+              </div>
+            </div>
+
+            {/* Upload Options Row */}
+            <div className="flex items-center gap-4 flex-wrap justify-center pt-2 border-t border-slate-800/80 w-full max-w-lg">
+              <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoQueueOnUpload}
+                  onChange={(e) => setAutoQueueOnUpload(e.target.checked)}
+                  className="rounded text-indigo-600 focus:ring-indigo-500 w-4 h-4 accent-indigo-600"
+                />
+                <span className="font-semibold">شروع خودکار ترجمه پس از آپلود</span>
+              </label>
+
+              <div className="flex items-center gap-2 text-xs text-slate-300">
+                <span>لحن ترجمه:</span>
+                <select
+                  value={uploadTone}
+                  onChange={(e) => setUploadTone(e.target.value as ToneOption)}
+                  className="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="cinematic">سینمایی و دراماتیک (پیش‌فرض)</option>
+                  <option value="conversational">عامیانه و گفتاری</option>
+                  <option value="formal">رسمی و کتابی</option>
+                  <option value="epic">حماسی و تاریخی</option>
+                  <option value="humorous">طنز و شوخ‌طبعانه</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Hidden File Input */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".srt,.vtt,.ass,.ssa,.sub"
+              onChange={handleFilesUpload}
+              className="hidden"
+            />
+
+            {/* Select Files Button */}
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isUploading}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 transition-all shadow-md shadow-indigo-600/30 cursor-pointer"
+            >
+              {isUploading ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>در حال آپلود و ذخیره فایل‌ها در پوشه...</span>
+                </>
+              ) : (
+                <>
+                  <Upload className="w-4 h-4" />
+                  <span>انتخاب فایل‌های زیرنویس این پوشه</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* Subtitle Files List in Folder */}
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center justify-between text-xs text-slate-400 px-1">
+              <span className="font-bold text-slate-200 flex items-center gap-1.5">
+                <FileText className="w-4 h-4 text-indigo-400" />
+                <span>فایل‌های زیرنویس پوشه «{selectedFolder.name}» ({projects.length})</span>
+              </span>
+              <span className="text-[11px] text-emerald-400 font-semibold">
+                ✓ مشخص شده برای پوشه: «{selectedFolder.name}»
+              </span>
+            </div>
+
+            {loadingProjects ? (
+              <div className="py-16 flex items-center justify-center text-slate-400 text-xs gap-2">
+                <Loader2 className="w-5 h-5 animate-spin text-indigo-400" />
+                <span>در حال بارگذاری فایل‌های پوشه...</span>
+              </div>
+            ) : projects.length === 0 ? (
+              <div className="py-14 text-center text-slate-400 text-xs bg-slate-900/40 rounded-2xl border border-dashed border-slate-800 p-6 flex flex-col items-center gap-2">
+                <FileText className="w-8 h-8 text-slate-500" />
+                <span className="font-bold text-slate-300">این پوشه هنوز هیچ فایلی ندارد</span>
+                <p className="text-slate-400 max-w-sm">
+                  با استفاده از کادر آپلود بالا، فایل‌های زیرنویس (نظیر قسمت‌های ۱ تا ۲۶) را انتخاب کنید تا فوراً در این پوشه قرار گیرند.
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                {projects
+                  .filter((p) => !searchQuery.trim() || p.name.toLowerCase().includes(searchQuery.toLowerCase()))
+                  .map((proj) => {
+                    const isComplete = proj.status === 'completed' || (proj.totalCues > 0 && proj.translatedCues >= proj.totalCues);
+                    const isTranslating = proj.status === 'translating';
+                    const isQueued = proj.status === 'queued';
+                    const isWaitingKeys = proj.status === 'waiting_for_keys';
+                    const isIncomplete = proj.status === 'has_incomplete';
+                    const pct = proj.totalCues > 0 ? Math.round((proj.translatedCues / proj.totalCues) * 100) : 0;
+
+                    return (
+                      <div
+                        key={proj.id}
+                        className="bg-slate-900/80 rounded-2xl border border-slate-800/90 hover:border-slate-700 p-4 flex flex-col gap-3 transition-all shadow-xs"
+                      >
+                        <div className="flex items-center justify-between gap-3 flex-wrap">
+                          <div className="flex items-center gap-3 overflow-hidden">
+                            <div className="w-9 h-9 rounded-xl bg-slate-800 flex items-center justify-center text-indigo-400 shrink-0">
+                              <FileText className="w-4 h-4" />
+                            </div>
+
+                            <div className="flex flex-col gap-1">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-bold text-xs text-white truncate max-w-[280px] sm:max-w-[380px]">
+                                  {proj.name}
+                                </span>
+
+                                {/* EXPLICIT FOLDER BADGE (مشخص شدن پوشه هر فایل) */}
+                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 flex items-center gap-1">
+                                  <Folder className="w-3 h-3 text-indigo-400" />
+                                  <span>{selectedFolder.name}</span>
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono">
+                                <span className="uppercase px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 font-bold">
+                                  {proj.format}
+                                </span>
+                                <span>•</span>
+                                <span className={isIncomplete ? 'text-amber-400 font-bold' : ''}>
+                                  {proj.translatedCues} / {proj.totalCues} سطر
+                                </span>
+                                {proj.tokenUsage?.totalTokens > 0 && (
+                                  <>
+                                    <span>•</span>
+                                    <span>{proj.tokenUsage.totalTokens.toLocaleString()} توکن</span>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Status Badge & Actions */}
+                          <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                            {/* Status */}
+                            {isComplete ? (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                                <span>تکمیل (۱۰۰٪)</span>
+                              </span>
+                            ) : isTranslating ? (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center gap-1 animate-pulse">
+                                <Loader2 className="w-3 h-3 animate-spin text-amber-400" />
+                                <span>در حال ترجمه ({pct}%)</span>
+                              </span>
+                            ) : isWaitingKeys ? (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30 flex items-center gap-1">
+                                <Clock className="w-3 h-3 text-purple-400" />
+                                <span>در انتظار کلید/سهمیه ({pct}%)</span>
+                              </span>
+                            ) : isIncomplete ? (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                                <AlertCircle className="w-3 h-3 text-amber-400" />
+                                <span>ترجمه ناقص ({pct}%)</span>
+                              </span>
+                            ) : isQueued ? (
+                              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 flex items-center gap-1">
+                                <Clock className="w-3 h-3 text-slate-400" />
+                                <span>در صف سرور</span>
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
+                                متوقف
+                              </span>
+                            )}
+
+                            {/* Resume button if incomplete or paused */}
+                            {(isIncomplete || isWaitingKeys || proj.status === 'paused') && !isTranslating && (
+                              <button
+                                type="button"
+                                onClick={() => handleResumeProject(proj.id, proj.name)}
+                                className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-emerald-300 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 rounded-lg transition-colors"
+                                title="ادامه ترجمه از سطر باقی‌مانده"
+                              >
+                                <Play className="w-3 h-3 fill-current" />
+                                <span>ادامه ترجمه</span>
+                              </button>
+                            )}
+
+                            {/* Start translation if idle */}
+                            {!isTranslating && !isIncomplete && !isWaitingKeys && (
+                              <button
+                                type="button"
+                                onClick={() => handleStartProject(proj.id, proj.name)}
+                                disabled={isComplete}
+                                className="p-1.5 text-slate-300 hover:text-indigo-400 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors disabled:opacity-30"
+                                title="شروع ترجمه در پس‌زمینه"
+                              >
+                                <Play className="w-3.5 h-3.5 fill-current" />
+                              </button>
+                            )}
+
+                            {/* Pause button */}
+                            {isTranslating && (
+                              <button
+                                type="button"
+                                onClick={() => handlePauseProject(proj.id, proj.name)}
+                                className="p-1.5 text-amber-400 hover:text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 rounded-lg transition-colors"
+                                title="توقف موقت ترجمه"
+                              >
+                                <Pause className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+
+                            {/* Single VTT Export */}
+                            <a
+                              href={`/api/projects/${proj.id}/export/vtt`}
+                              download
+                              className="p-1.5 text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 rounded-lg transition-colors flex items-center gap-1 text-[11px] font-semibold"
+                              title="دانلود فایل WebVTT (.vtt)"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span>VTT</span>
+                            </a>
+
+                            {/* Open in Full Editor */}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onOpenProjectInEditor({
+                                  id: proj.id,
+                                  name: proj.name,
+                                  folderName: selectedFolder.name,
+                                  items: proj.items,
+                                  format: proj.format as SubtitleFormat,
+                                  rawHeader: proj.rawHeader,
+                                })
+                              }
+                              className="p-1.5 text-slate-300 hover:text-indigo-400 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
+                              title="مشاهده و ویرایش در ادیتور سریع"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                            </button>
+
+                            {/* Move to another folder */}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setMovingProject({ ...proj, folderName: selectedFolder.name });
+                                setTargetMoveFolderId('');
+                                setIsMoveModalOpen(true);
+                              }}
+                              className="p-1.5 text-slate-400 hover:text-amber-300 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
+                              title="انتقال این فایل به پوشه‌ای دیگر"
+                            >
+                              <MoveRight className="w-3.5 h-3.5" />
+                            </button>
+
+                            {/* Delete File */}
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteProject(proj.id, proj.name)}
+                              className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors"
+                              title="حذف این زیرنویس"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Error message */}
+                        {proj.lastError && (
+                          <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-2.5 text-[11px] text-amber-200 flex items-start gap-2">
+                            <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                            <div className="flex flex-col gap-0.5">
+                              <span className="font-bold text-amber-300">گزارش وضعیت:</span>
+                              <span>{proj.lastError}</span>
+                              <span className="text-emerald-400 font-semibold text-[10px] mt-0.5">
+                                ✓ تمام سطرهای ترجمه شده تا به اینجا ({proj.translatedCues} سطر) در دیتابیس سرور کاملاً محفوظ است.
+                              </span>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Progress bar */}
+                        <div className="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all duration-300 ${
+                              isComplete
+                                ? 'bg-emerald-500'
+                                : isIncomplete
+                                ? 'bg-amber-500'
+                                : isWaitingKeys
+                                ? 'bg-purple-500'
+                                : 'bg-indigo-500'
+                            }`}
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* VIEW 3: ALL FILES LIST ACROSS ALL FOLDERS (نمای جامع تمام فایل‌ها با برچسب مشخص پوشه) */}
+      {activeView === 'all_files' && (
+        <div className="flex flex-col gap-4 animate-fade-in">
+          <div className="flex items-center justify-between text-xs text-slate-400 px-1">
+            <span className="font-bold text-white flex items-center gap-2">
+              <FileText className="w-4 h-4 text-cyan-400" />
+              <span>تمام فایل‌های زیرنویس دیتابیس سرور ({allProjects.length})</span>
+            </span>
+            <span className="text-[11px] text-slate-400">
+              کلیک روی برچسب پوشه شما را مستقیماً وارد آن پوشه می‌کند
+            </span>
+          </div>
+
+          {loadingAllProjects ? (
+            <div className="py-20 flex flex-col items-center justify-center text-slate-400 text-xs gap-3">
+              <Loader2 className="w-6 h-6 animate-spin text-cyan-400" />
+              <span>در حال بارگذاری تمام زیرنویس‌ها...</span>
+            </div>
+          ) : allProjects.length === 0 ? (
+            <div className="py-16 text-center text-slate-500 text-xs bg-slate-900/40 rounded-2xl border border-slate-800 p-6">
+              هنوز هیچ فایلی در سرور ثبت نشده است. ابتدا یک پوشه ایجاد کرده و فایل‌ها را آپلود کنید.
+            </div>
+          ) : (
+            <div className="flex flex-col gap-3">
+              {allProjects
+                .filter((p) => {
+                  if (!searchQuery.trim()) return true;
+                  const q = searchQuery.toLowerCase();
+                  return p.name.toLowerCase().includes(q) || (p.folderName && p.folderName.toLowerCase().includes(q));
+                })
+                .map((proj) => {
+                  const pct = proj.totalCues > 0 ? Math.round((proj.translatedCues / proj.totalCues) * 100) : 0;
+                  const isComplete = proj.status === 'completed' || (proj.totalCues > 0 && proj.translatedCues >= proj.totalCues);
+                  const isTranslating = proj.status === 'translating';
+
+                  return (
+                    <div
+                      key={proj.id}
+                      className="bg-slate-900/80 rounded-2xl border border-slate-800/90 hover:border-slate-700 p-4 flex flex-col gap-2.5 transition-all shadow-xs"
+                    >
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <div className="flex items-center gap-3 overflow-hidden">
+                          <FileText className="w-4 h-4 text-cyan-400 shrink-0" />
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-bold text-xs text-white truncate max-w-[280px] sm:max-w-[360px]">
+                                {proj.name}
+                              </span>
+
+                              {/* CLICKABLE FOLDER BADGE */}
+                              <button
+                                type="button"
+                                onClick={() => handleEnterFolder(proj.folderId)}
+                                className="text-[10px] font-bold px-2.5 py-0.5 rounded-md bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/30 flex items-center gap-1 transition-colors cursor-pointer"
+                                title="ورود به این پوشه"
+                              >
+                                <Folder className="w-3 h-3 text-indigo-400" />
+                                <span>{proj.folderName || 'پوشه'}</span>
+                                <ExternalLink className="w-2.5 h-2.5 text-indigo-400" />
+                              </button>
+                            </div>
+
+                            <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono">
+                              <span className="uppercase px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 font-bold">
+                                {proj.format}
+                              </span>
+                              <span>•</span>
+                              <span>{proj.translatedCues} / {proj.totalCues} سطر ({pct}%)</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Actions */}
+                        <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                          {isComplete ? (
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                              تکمیل (۱۰۰٪)
+                            </span>
+                          ) : isTranslating ? (
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 animate-pulse">
+                              در حال ترجمه ({pct}%)
+                            </span>
+                          ) : (
+                            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
+                              {proj.status === 'queued' ? 'در صف' : 'آماده'}
+                            </span>
+                          )}
+
+                          {/* Single VTT */}
+                          <a
+                            href={`/api/projects/${proj.id}/export/vtt`}
+                            download
+                            className="p-1.5 text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 rounded-lg transition-colors flex items-center gap-1 text-[11px] font-semibold"
+                            title="دانلود فایل VTT"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            <span>VTT</span>
+                          </a>
+
+                          {/* Open In Editor */}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onOpenProjectInEditor({
+                                id: proj.id,
+                                name: proj.name,
+                                folderName: proj.folderName,
+                                items: proj.items,
+                                format: proj.format as SubtitleFormat,
+                                rawHeader: proj.rawHeader,
+                              })
+                            }
+                            className="p-1.5 text-slate-300 hover:text-indigo-400 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
+                            title="مشاهده در ادیتور"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                          </button>
+
+                          {/* Move to another folder */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMovingProject(proj);
+                              setTargetMoveFolderId('');
+                              setIsMoveModalOpen(true);
+                            }}
+                            className="p-1.5 text-slate-400 hover:text-amber-300 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
+                            title="انتقال به پوشه دیگر"
+                          >
+                            <MoveRight className="w-3.5 h-3.5" />
+                          </button>
+
+                          {/* Enter Folder */}
+                          <button
+                            type="button"
+                            onClick={() => handleEnterFolder(proj.folderId)}
+                            className="flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-bold text-indigo-300 bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 transition-colors"
+                            title="ورود به پوشه این فایل"
+                          >
+                            <FolderOpen className="w-3 h-3" />
+                            <span>مشاهده در پوشه</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Progress bar */}
+                      <div className="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-300 ${
+                            isComplete ? 'bg-emerald-500' : 'bg-indigo-500'
+                          }`}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Modal: Move Project To Another Folder */}
+      {isMoveModalOpen && movingProject && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 w-full max-w-md shadow-2xl flex flex-col gap-4 animate-scale-up">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <MoveRight className="w-4 h-4 text-amber-400" />
+                <span>انتقال زیرنویس به پوشه‌ای دیگر</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIsMoveModalOpen(false)}
+                className="text-slate-400 hover:text-white text-xs"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs text-slate-400 font-semibold">فایل زیرنویس:</span>
+              <span className="text-xs font-bold text-white truncate max-w-full bg-slate-950 p-2.5 rounded-xl border border-slate-800 font-mono">
+                {movingProject.name}
+              </span>
+            </div>
+
+            <form onSubmit={handleMoveProjectSubmit} className="flex flex-col gap-4">
+              <div>
+                <label className="text-xs text-slate-300 font-semibold block mb-1.5">
+                  انتخاب پوشه مقصد جدید:
+                </label>
+                <select
+                  value={targetMoveFolderId}
+                  onChange={(e) => setTargetMoveFolderId(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="">-- لطفاً یک پوشه را انتخاب کنید --</option>
+                  {folders
+                    .filter((f) => f.id !== movingProject.folderId)
+                    .map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.name} ({f.projectCount} فایل)
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setIsMoveModalOpen(false)}
+                  className="px-3.5 py-1.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white"
+                >
+                  انصراف
+                </button>
+                <button
+                  type="submit"
+                  disabled={!targetMoveFolderId}
+                  className="px-4 py-1.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 shadow-md transition-colors flex items-center gap-1.5"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>انتقال به این پوشه</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Modal: New Folder */}
       {isNewFolderOpen && (

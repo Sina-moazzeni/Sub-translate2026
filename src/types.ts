@@ -311,6 +311,26 @@ export interface QueueFileItem {
   completedAt?: number;
 }
 
+export interface BatchHealthStatus {
+  batchIndex: number;
+  status: 'success' | 'failed' | 'retrying' | 'running' | 'pending';
+  cueRange?: string;
+  cuesCount?: number;
+  retryCount?: number;
+  maxRetries?: number;
+  error?: string;
+  durationMs?: number;
+}
+
+export interface FailedTranslationItem {
+  batchIndex: number;
+  cueIndex?: number;
+  cueId?: string | number;
+  originalText?: string;
+  error?: string;
+  timestamp?: string;
+}
+
 
 
 

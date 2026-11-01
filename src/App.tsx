@@ -15,7 +15,9 @@ import {
   CustomProviderConfig,
   ModeSessionState,
   QueueFileItem,
-  TokenUsageStats
+  TokenUsageStats,
+  BatchHealthStatus,
+  FailedTranslationItem
 } from './types';
 import { 
   createDefaultSession, 
@@ -341,6 +343,8 @@ export default function App() {
   const [totalBatches, setTotalBatches] = useState<number>(0);
   const [translatedCount, setTranslatedCount] = useState<number>(0);
   const [retryInfo, setRetryInfo] = useState<{ batch: number; attempt: number; maxRetries: number } | null>(null);
+  const [batchHealthList, setBatchHealthList] = useState<BatchHealthStatus[]>([]);
+  const [failedItems, setFailedItems] = useState<FailedTranslationItem[]>([]);
 
   // Modals & Notifications
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -1317,6 +1321,20 @@ export default function App() {
     setCurrentBatch(0);
     setTranslatedCount(0);
 
+    const initialStreamHealth: BatchHealthStatus[] = Array.from({ length: totalBatchesCount }, (_, idx) => {
+      const start = idx * STREAM_CHUNK_SIZE + 1;
+      const end = Math.min(totalCount, (idx + 1) * STREAM_CHUNK_SIZE);
+      return {
+        batchIndex: idx + 1,
+        status: 'pending',
+        cueRange: `${start} - ${end}`,
+        cuesCount: Math.max(1, end - start + 1),
+        maxRetries: 1,
+      };
+    });
+    setBatchHealthList(initialStreamHealth);
+    setFailedItems([]);
+
     for (let b = 0; b < totalBatchesCount; b++) {
       if (isJobDead()) break;
 
@@ -1328,6 +1346,13 @@ export default function App() {
       if (isJobDead()) break;
 
       setCurrentBatch(b + 1);
+      setBatchHealthList((prev) =>
+        prev.map((item) =>
+          item.batchIndex === b + 1
+            ? { ...item, status: 'running' }
+            : item
+        )
+      );
       const startIndex = b * STREAM_CHUNK_SIZE;
       const batchSlice = items.slice(startIndex, startIndex + STREAM_CHUNK_SIZE);
 
@@ -1481,6 +1506,16 @@ export default function App() {
             }
           }
         }
+
+        if (!clientGone && !isJobDead()) {
+          setBatchHealthList((prev) =>
+            prev.map((item) =>
+              item.batchIndex === b + 1
+                ? { ...item, status: 'success' }
+                : item
+            )
+          );
+        }
       } catch (streamErr: any) {
         // FIX (Cancellation): an abort from the Cancel button is not an error — exit quietly.
         // Previously an abort/network error was toasted and the loop CONTINUED to the next batch.
@@ -1488,7 +1523,26 @@ export default function App() {
           clientGone = true;
         } else {
           console.error('Live streaming network/parse error:', streamErr);
-          showToast(streamErr?.message || 'Error in live streaming translation', 'error');
+          const errMsg = streamErr?.message || 'Error in live streaming translation';
+          showToast(errMsg, 'error');
+          setBatchHealthList((prev) =>
+            prev.map((item) =>
+              item.batchIndex === b + 1
+                ? { ...item, status: 'failed', error: errMsg }
+                : item
+            )
+          );
+          setFailedItems((prev) => [
+            ...prev,
+            ...batchSlice.map((item, idx) => ({
+              batchIndex: b + 1,
+              cueIndex: startIndex + idx + 1,
+              cueId: item.id,
+              originalText: item.originalText,
+              error: errMsg,
+              timestamp: new Date().toISOString(),
+            })),
+          ]);
         }
       } finally {
         // FIX: release the abort controller slot so a fresh job registers its own
@@ -1640,6 +1694,20 @@ export default function App() {
     setCurrentBatch(0);
     setTranslatedCount(0);
 
+    const initialHealth: BatchHealthStatus[] = Array.from({ length: totalBatchesCount }, (_, idx) => {
+      const start = idx * BATCH_SIZE + 1;
+      const end = Math.min(totalCount, (idx + 1) * BATCH_SIZE);
+      return {
+        batchIndex: idx + 1,
+        status: 'pending',
+        cueRange: `${start} - ${end}`,
+        cuesCount: Math.max(1, end - start + 1),
+        maxRetries: 3,
+      };
+    });
+    setBatchHealthList(initialHealth);
+    setFailedItems([]);
+
     const isRTL = RTL_LANGUAGES.includes(targetLanguage);
 
     for (let b = 0; b < totalBatchesCount; b++) {
@@ -1654,6 +1722,13 @@ export default function App() {
       if (cancelTranslationRef.current || activeJobIdRef.current !== currentJobId) break;
 
       setCurrentBatch(b + 1);
+      setBatchHealthList((prev) =>
+        prev.map((item) =>
+          item.batchIndex === b + 1
+            ? { ...item, status: 'running' }
+            : item
+        )
+      );
 
       const startIndex = b * BATCH_SIZE;
       const batchSlice = currentItems.slice(startIndex, startIndex + BATCH_SIZE);
@@ -1697,12 +1772,20 @@ export default function App() {
       let attempt = 0;
       let isInstantKeyFailover = false;
       let keyFailoversDone = 0;
+      let lastBatchError = '';
       const MAX_RETRIES = 3; // Consolidated unified retries (Requirements 6, 7, 8)
 
       while (!success && attempt < MAX_RETRIES && !cancelTranslationRef.current && activeJobIdRef.current === currentJobId) {
         attempt++;
         if (attempt > 1 && !isInstantKeyFailover) {
           setRetryInfo({ batch: b + 1, attempt, maxRetries: MAX_RETRIES });
+          setBatchHealthList((prev) =>
+            prev.map((item) =>
+              item.batchIndex === b + 1
+                ? { ...item, status: 'retrying', retryCount: attempt, maxRetries: MAX_RETRIES }
+                : item
+            )
+          );
           // Exponential backoff with jitter only for actual retry of same key pool
           const baseDelay = Math.min(Math.pow(2, attempt - 1) * 2000, 16000);
           const jitter = Math.floor(Math.random() * 1000);
@@ -1910,14 +1993,22 @@ export default function App() {
             setTranslatedCount((prev) => prev + batchSlice.length);
             success = true;
             setRetryInfo(null);
+            setBatchHealthList((prev) =>
+              prev.map((item) =>
+                item.batchIndex === b + 1
+                  ? { ...item, status: 'success', retryCount: attempt }
+                  : item
+              )
+            );
           }
         } catch (err: any) {
           if (err?.name === 'AbortError' || cancelTranslationRef.current || activeJobIdRef.current !== currentJobId) {
             break;
           }
           console.error(`Batch ${b + 1} attempt ${attempt} failed:`, err);
+          const errMsg = err instanceof Error ? err.message : `Batch ${b + 1} failed after ${MAX_RETRIES} attempts.`;
+          lastBatchError = errMsg;
           if (attempt >= MAX_RETRIES) {
-            const errMsg = err instanceof Error ? err.message : `Batch ${b + 1} failed after ${MAX_RETRIES} attempts.`;
             showToast(errMsg, 'error');
           }
         } finally {
@@ -1925,6 +2016,29 @@ export default function App() {
             activeAbortControllerRef.current = null;
           }
         }
+      }
+
+      // If batch failed after all retries, mark in health list and save failed items
+      if (!success && !cancelTranslationRef.current && activeJobIdRef.current === currentJobId) {
+        const batchErrMsg = lastBatchError || `Batch ${b + 1} failed after ${MAX_RETRIES} attempts.`;
+        setBatchHealthList((prev) =>
+          prev.map((item) =>
+            item.batchIndex === b + 1
+              ? { ...item, status: 'failed', error: batchErrMsg, retryCount: attempt }
+              : item
+          )
+        );
+        setFailedItems((prev) => [
+          ...prev,
+          ...batchSlice.map((item, idx) => ({
+            batchIndex: b + 1,
+            cueIndex: startIndex + idx + 1,
+            cueId: item.id,
+            originalText: item.originalText,
+            error: batchErrMsg,
+            timestamp: new Date().toISOString(),
+          })),
+        ]);
       }
 
       // Adaptive pacing delay between batches to protect against RPM/TPM rate limits
@@ -2270,6 +2384,8 @@ export default function App() {
     sessionsRef.current[mode] = defaultSession;
     await clearSessionInDb(mode);
     applySessionState(defaultSession);
+    setBatchHealthList([]);
+    setFailedItems([]);
     showToast(t.allDataReset, 'info');
   };
 
@@ -2277,6 +2393,7 @@ export default function App() {
   const handleOpenProjectInEditor = (project: {
     id: string;
     name: string;
+    folderName?: string;
     items: SubtitleItem[];
     format: SubtitleFormat;
     rawHeader?: string;
@@ -2288,7 +2405,8 @@ export default function App() {
     setTargetFormat(project.format);
     setRawHeader(project.rawHeader);
     setMode('cinema');
-    showToast(`زیرنویس "${project.name}" در ادیتور سینمایی بارگذاری شد.`, 'success');
+    const folderInfo = project.folderName ? ` (از پوشه: ${project.folderName})` : '';
+    showToast(`زیرنویس "${project.name}"${folderInfo} در ادیتور سینمایی بارگذاری شد.`, 'success');
   };
 
   return (
@@ -2448,6 +2566,9 @@ export default function App() {
             tokenUsage={tokenUsage}
             activeKeyIndex={activeKeyIndex}
             totalKeysCount={getProviderKeys(activeAiProvider).length}
+            batchHealth={batchHealthList}
+            failedItems={failedItems}
+            fileName={fileName}
           />
         )}
 

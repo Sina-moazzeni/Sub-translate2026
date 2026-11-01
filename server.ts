@@ -2401,12 +2401,60 @@ app.get('/api/folders/:folderId/export/vtt', async (req, res) => {
   }
 });
 
-// 10. Single Project Details
+// 10. All Projects across all folders
+app.get('/api/projects', (req, res) => {
+  try {
+    const projects = getAllProjects();
+    const folders = getAllFolders();
+    const folderMap = new Map(folders.map((f) => [f.id, f.name]));
+    const enriched = projects.map((p) => ({
+      ...p,
+      folderName: folderMap.get(p.folderId) || 'پوشه نامشخص',
+    }));
+    return res.json({ success: true, projects: enriched });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 10b. Single Project Details
 app.get('/api/projects/:id', (req, res) => {
   try {
     const project = getProjectById(req.params.id);
     if (!project) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
-    return res.json({ success: true, project });
+    const folder = getFolderById(project.folderId);
+    return res.json({
+      success: true,
+      project: {
+        ...project,
+        folderName: folder?.name || 'پوشه نامشخص',
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 10c. Move Project to another folder
+app.put('/api/projects/:id/move', (req, res) => {
+  try {
+    const { targetFolderId } = req.body || {};
+    if (!targetFolderId) {
+      return res.status(400).json({ success: false, error: 'شناسه پوشه مقصد الزامی است.' });
+    }
+    const targetFolder = getFolderById(targetFolderId);
+    if (!targetFolder) {
+      return res.status(404).json({ success: false, error: 'پوشه مقصد یافت نشد.' });
+    }
+    const updated = updateProject(req.params.id, { folderId: targetFolderId });
+    if (!updated) {
+      return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    }
+    return res.json({
+      success: true,
+      project: updated,
+      message: `فایل با موفقیت به پوشه "${targetFolder.name}" انتقال یافت.`,
+    });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
   }
