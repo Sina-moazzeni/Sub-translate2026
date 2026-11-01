@@ -66,5 +66,10 @@
   "stats": {
     "totalTranslations": 0,
     "totalTokensUsed": 0
+  },
+  "serverConfig": {
+    "allowedOrigin": "*",
+    "geminiBaseUrl": "https://generativelanguage.googleapis.com",
+    "maxConcurrentProjects": 3
   }
 }

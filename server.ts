@@ -36,6 +36,15 @@ import {
   getServerKeys,
   setServerKeys,
   addServerKeys,
+  updateSingleServerKey,
+  deleteSingleServerKey,
+  getServerKeysWithDetails,
+  getServerConfig,
+  updateServerConfig,
+  createBackupJson,
+  restoreBackupJson,
+  getDatabaseFilePath,
+  getKeyExhaustionStatus,
   ServerSubtitleProject
 } from './src/server/database';
 import {
@@ -45,7 +54,10 @@ import {
   queueFolderForTranslation,
   pauseFolderTranslation,
   queueSingleProject,
-  pauseSingleProject
+  pauseSingleProject,
+  resumeSingleProject,
+  restartProject,
+  testServerKey
 } from './src/server/backgroundWorker';
 
 dotenv.config();
@@ -56,31 +68,25 @@ const _dirname = typeof __dirname !== 'undefined'
   : process.cwd();
 
 // Runtime status of static frontend hosting, surfaced via /api/health for remote diagnosis.
-// FIX (WHITE-SCREEN INCIDENT, Render 2026-09-14): when the platform build never ran
-// (dist/ missing) the old code silently served the REPO ROOT, which returned the raw
-// dev index.html (references /src/main.tsx -> blank white page) AND exposed the entire
-// source tree (server.ts, package-lock.json, render.yaml...) via express.static.
 let PROD_STATIC_STATE: 'build' | 'missing' | 'dev' = 'dev';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-// ─── FIX (B1): protect the server's own API key & expensive endpoints ─────────────
-// 1) CORS lockdown: when ALLOWED_ORIGIN is set (e.g. "https://myapp.example.com"), only that
-//    origin is echoed back instead of the wildcard that let any website burn the server quota.
-const ALLOWED_ORIGIN = (process.env.ALLOWED_ORIGIN || '').trim();
+// Dynamic CORS configuration (default: open to all hosts/origins '*')
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (ALLOWED_ORIGIN && origin) {
-    const allowedList = ALLOWED_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean);
-    if (allowedList.includes(origin)) {
+  const config = getServerConfig();
+  const allowed = (config.allowedOrigin || process.env.ALLOWED_ORIGIN || '*').trim();
+
+  if (!allowed || allowed === '*' || !origin) {
+    res.header('Access-Control-Allow-Origin', '*');
+  } else {
+    const allowedList = allowed.split(',').map((o) => o.trim()).filter(Boolean);
+    if (allowedList.includes('*') || allowedList.includes(origin)) {
       res.header('Access-Control-Allow-Origin', origin);
       res.header('Vary', 'Origin');
     }
-    // Non-allowed origins get no CORS headers → browsers block the response
-  } else {
-    // Local development / unconfigured deployments keep the previous open behavior
-    res.header('Access-Control-Allow-Origin', '*');
   }
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-gemini-api-key, x-gemini-api-keys');
@@ -150,13 +156,17 @@ function getGenAIClient(customApiKey?: string): GoogleGenAI {
   if (!apiKey) {
     throw new Error('کلید API جمینای تنظیم نشده است. لطفا کلید خود را در منوی "کلید API" بالای صفحه وارد کنید.');
   }
+  const config = getServerConfig();
+  const rawBaseUrl = config.geminiBaseUrl?.trim() || process.env.GEMINI_BASE_URL?.trim();
+  let normalizedBaseUrl: string | undefined = undefined;
+  if (rawBaseUrl && rawBaseUrl !== 'https://generativelanguage.googleapis.com') {
+    normalizedBaseUrl = rawBaseUrl.replace(/\/+$/, '');
+  }
+
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
-      // FIX: GEMINI_BASE_URL allows pointing the SDK at a mock/self-hosted upstream —
-      // essential for deterministic integration tests of failover/quota/stream behavior
-      // (undefined in production = default Google endpoint, zero behavior change).
-      baseUrl: process.env.GEMINI_BASE_URL?.trim() || undefined,
+      baseUrl: normalizedBaseUrl,
       headers: {
         'User-Agent': 'aistudio-build',
       },
@@ -2446,6 +2456,42 @@ app.post('/api/projects/:id/pause', (req, res) => {
   }
 });
 
+// 14b. Resume single project background translation
+app.post('/api/projects/:id/resume', (req, res) => {
+  try {
+    const success = resumeSingleProject(req.params.id);
+    if (!success) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    return res.json({ success: true, message: 'ترجمه پروژه از آخرین سطر باقی‌مانده ادامه می‌یابد.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 14c. Restart project translation (full restart or incomplete only)
+app.post('/api/projects/:id/restart', (req, res) => {
+  try {
+    const { onlyIncomplete = false } = req.body || {};
+    const success = restartProject(req.params.id, Boolean(onlyIncomplete));
+    if (!success) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    const msg = onlyIncomplete 
+      ? 'سطرهای ناقص یا ترجمه‌نشده مجدداً در صف ترجمه قرار گرفتند.' 
+      : 'کل زیرنویس بازنشانی و ترجمه از ابتدا آغاز شد.';
+    return res.json({ success: true, message: msg });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 14d. Folder resume
+app.post('/api/folders/:folderId/resume', (req, res) => {
+  try {
+    const count = queueFolderForTranslation(req.params.folderId);
+    return res.json({ success: true, count, message: `${count} پروژه برای ادامه ترجمه به صف اضافه شدند.` });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
 // 15. Single project VTT download
 app.get('/api/projects/:id/export/vtt', (req, res) => {
   try {
@@ -2463,26 +2509,44 @@ app.get('/api/projects/:id/export/vtt', (req, res) => {
   }
 });
 
-// 16. Get server key rotation pool
+// 16. Server Config: Get & Update (ALLOWED_ORIGIN, GEMINI_BASE_URL, maxConcurrentProjects)
+app.get('/api/server/config', (req, res) => {
+  try {
+    const config = getServerConfig();
+    return res.json({ success: true, config });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+app.post('/api/server/config', (req, res) => {
+  try {
+    const { allowedOrigin, geminiBaseUrl, maxConcurrentProjects } = req.body || {};
+    const updated = updateServerConfig({ allowedOrigin, geminiBaseUrl, maxConcurrentProjects });
+    return res.json({ success: true, config: updated, message: 'تنظیمات سرور با موفقیت به‌روزرسانی شد.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 17. Get server key rotation pool with full details
 app.get('/api/server/keys', (req, res) => {
   try {
     const allKeys = getServerKeys();
-    const masked = allKeys.map((k) => {
-      const len = k.length;
-      if (len <= 8) return '****';
-      return k.substring(0, 4) + '...' + k.substring(len - 4);
-    });
+    const details = getServerKeysWithDetails();
+    const masked = details.map((d) => d.maskedKey);
     return res.json({
       success: true,
       count: allKeys.length,
       keys: masked,
+      details,
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
   }
 });
 
-// 17. Add / update server keys
+// 18. Add / update server keys (batch)
 app.post('/api/server/keys', (req, res) => {
   try {
     const { keys, mode = 'append' } = req.body || {};
@@ -2500,6 +2564,42 @@ app.post('/api/server/keys', (req, res) => {
   }
 });
 
+// 18b. Edit single server key by index
+app.put('/api/server/keys/:index', (req, res) => {
+  try {
+    const index = parseInt(req.params.index, 10);
+    const { key } = req.body || {};
+    if (!key || typeof key !== 'string' || !key.trim()) {
+      return res.status(400).json({ success: false, error: 'کلید معتبر الزامی است.' });
+    }
+    const updatedKeys = updateSingleServerKey(index, key.trim());
+    return res.json({
+      success: true,
+      count: updatedKeys.length,
+      message: `کلید #${index + 1} با موفقیت ویرایش شد.`,
+      details: getServerKeysWithDetails(),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 18c. Delete single server key by index
+app.delete('/api/server/keys/:index', (req, res) => {
+  try {
+    const index = parseInt(req.params.index, 10);
+    const updatedKeys = deleteSingleServerKey(index);
+    return res.json({
+      success: true,
+      count: updatedKeys.length,
+      message: `کلید مورد نظر با موفقیت از استخر سرور حذف شد.`,
+      details: getServerKeysWithDetails(),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
 // 18. Background worker status check
 app.get('/api/background/status', (req, res) => {
   try {
@@ -2510,6 +2610,76 @@ app.get('/api/background/status', (req, res) => {
   }
 });
 
+// 19. Server-Side Key Verification (Completely independent of user's browser)
+app.post('/api/server/keys/test', async (req, res) => {
+  try {
+    const { key } = req.body || {};
+    const keyToTest = key?.trim() || getServerKeys()[0];
+    if (!keyToTest) {
+      return res.status(400).json({ success: false, message: 'هیچ کلیدی برای تست ارسال نشده است.' });
+    }
+    const result = await testServerKey(keyToTest);
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Server test failed' });
+  }
+});
+
+// 20. Key exhaustion status
+app.get('/api/server/keys/status', (req, res) => {
+  try {
+    const keyStatuses = getKeyExhaustionStatus();
+    return res.json({ success: true, keys: keyStatuses });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 21. Full Database Backup Download
+app.get('/api/backup', (req, res) => {
+  try {
+    const backupJson = createBackupJson();
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const filename = `SubGameLab_Backup_${dateStr}.json`;
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.send(backupJson);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: 'Failed to generate database backup' });
+  }
+});
+
+// 22. Restore Database from Backup
+app.post('/api/backup/restore', (req, res) => {
+  try {
+    const { backupContent } = req.body || {};
+    if (!backupContent || typeof backupContent !== 'string') {
+      return res.status(400).json({ success: false, error: 'محتوای فایل پشتیبان ارسال نشده است.' });
+    }
+    const result = restoreBackupJson(backupContent);
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to restore backup' });
+  }
+});
+
+// 23. Server and Storage Information (for VPS & local disk clarity)
+app.get('/api/server/info', (req, res) => {
+  try {
+    return res.json({
+      success: true,
+      model: 'Gemini 3.5 Flash Lite',
+      modelId: 'gemini-3.1-flash-lite',
+      databasePath: getDatabaseFilePath(),
+      vpsReady: true,
+      port: PORT,
+      host: '0.0.0.0',
+      description: 'فایل‌های زیرنویس و دیتابیس مستقیماً روی دیسک سرور در مسیر data/subtitles_db.json ذخیره می‌شوند.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
 
 // Health check route
 app.get('/api/health', (req, res) => {

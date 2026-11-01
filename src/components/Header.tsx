@@ -263,52 +263,7 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           </div>
 
-          {/* API Key / Provider Modal Button */}
-          {(() => {
-            const isNonGemini = activeProvider && activeProvider !== 'gemini';
-            const providerDef = activeProvider ? AI_PROVIDERS_CONFIG[activeProvider] : undefined;
-            const displayName = isNonGemini 
-              ? (providerDef?.name.split(' ')[0] || customProviderName || 'AI Provider')
-              : 'Gemini';
 
-            return (
-              <button
-                onClick={onOpenApiKeyModal}
-                className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-xl border transition-all active:scale-95 shrink-0 ${
-                  isNonGemini
-                    ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700/60 shadow-xs'
-                    : userApiKey
-                    ? 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border-indigo-300 dark:border-indigo-700/60 shadow-xs'
-                    : 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-700'
-                }`}
-                title={
-                  isNonGemini
-                    ? `Active Engine: ${providerDef?.name || customProviderName || 'BYOK'}`
-                    : userApiKey
-                    ? t.customKeyActive
-                    : t.defaultKeyActive
-                }
-              >
-                {isNonGemini ? (
-                  <Server className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                ) : (
-                  <Key className={`w-3.5 h-3.5 ${userApiKey ? 'text-indigo-600 dark:text-indigo-400' : 'text-amber-500'}`} />
-                )}
-                <span className="truncate max-w-[95px] sm:max-w-[125px]">
-                  {displayName}
-                </span>
-                <span
-                  className={`w-1.5 h-1.5 rounded-full ${
-                    isNonGemini
-                      ? 'bg-emerald-500 dark:bg-emerald-400 ring-2 ring-emerald-500/20'
-                      : userApiKey
-                      ? 'bg-indigo-500 dark:bg-indigo-400'
-                      : 'bg-slate-400 dark:bg-slate-500'
-                  }`}
-                />
-              </button>
-            );
-          })()}
 
           {/* Reset File Button */}
           {hasSubtitles && (

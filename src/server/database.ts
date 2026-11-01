@@ -10,7 +10,7 @@ export interface ServerFolder {
   updatedAt: string;
 }
 
-export type ProjectStatus = 'idle' | 'queued' | 'translating' | 'paused' | 'completed' | 'error';
+export type ProjectStatus = 'idle' | 'queued' | 'translating' | 'paused' | 'waiting_for_keys' | 'has_incomplete' | 'completed' | 'error';
 
 export interface ServerSubtitleProject {
   id: string;
@@ -28,6 +28,9 @@ export interface ServerSubtitleProject {
   currentBatchIndex: number;
   totalBatches: number;
   errorMessage?: string;
+  lastError?: string;
+  failedCueIds?: number[];
+  workerKeyUsed?: string;
   items: SubtitleItem[];
   tokenUsage: {
     promptTokens: number;
@@ -39,12 +42,19 @@ export interface ServerSubtitleProject {
   completedAt?: string;
 }
 
+export interface ServerConfig {
+  allowedOrigin: string; // default '*'
+  geminiBaseUrl: string; // default 'https://generativelanguage.googleapis.com'
+  maxConcurrentProjects: number; // default 2
+}
+
 export interface SubtitlesDatabase {
   version: number;
   folders: ServerFolder[];
   projects: ServerSubtitleProject[];
   serverKeys: string[];
   activeKeyIndex: number;
+  serverConfig?: ServerConfig;
   stats: {
     totalTranslations: number;
     totalTokensUsed: number;
@@ -63,6 +73,12 @@ function ensureDataDir() {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
 }
+
+const DEFAULT_SERVER_CONFIG: ServerConfig = {
+  allowedOrigin: process.env.ALLOWED_ORIGIN?.trim() || '*',
+  geminiBaseUrl: process.env.GEMINI_BASE_URL?.trim() || 'https://generativelanguage.googleapis.com',
+  maxConcurrentProjects: 2,
+};
 
 function loadDatabaseFromDisk(): SubtitlesDatabase {
   ensureDataDir();
@@ -113,6 +129,15 @@ function loadDatabaseFromDisk(): SubtitlesDatabase {
     }
     if (!parsed.stats) {
       parsed.stats = { totalTranslations: 0, totalTokensUsed: 0 };
+    }
+    if (!parsed.serverConfig) {
+      parsed.serverConfig = { ...DEFAULT_SERVER_CONFIG };
+    } else {
+      parsed.serverConfig = {
+        allowedOrigin: parsed.serverConfig.allowedOrigin ?? DEFAULT_SERVER_CONFIG.allowedOrigin,
+        geminiBaseUrl: parsed.serverConfig.geminiBaseUrl ?? DEFAULT_SERVER_CONFIG.geminiBaseUrl,
+        maxConcurrentProjects: Number(parsed.serverConfig.maxConcurrentProjects) || DEFAULT_SERVER_CONFIG.maxConcurrentProjects,
+      };
     }
     return parsed;
   } catch (err) {
@@ -289,6 +314,36 @@ export function deleteProject(id: string): boolean {
   return false;
 }
 
+// ─── Server Configuration Operations ──────────────────────────────────────────
+
+export function getServerConfig(): ServerConfig {
+  const db = getDatabase();
+  if (!db.serverConfig) {
+    db.serverConfig = { ...DEFAULT_SERVER_CONFIG };
+    saveDatabaseSync();
+  }
+  return db.serverConfig;
+}
+
+export function updateServerConfig(updates: Partial<ServerConfig>): ServerConfig {
+  const db = getDatabase();
+  if (!db.serverConfig) {
+    db.serverConfig = { ...DEFAULT_SERVER_CONFIG };
+  }
+  if (updates.allowedOrigin !== undefined) {
+    db.serverConfig.allowedOrigin = updates.allowedOrigin.trim() || '*';
+  }
+  if (updates.geminiBaseUrl !== undefined) {
+    db.serverConfig.geminiBaseUrl = updates.geminiBaseUrl.trim() || 'https://generativelanguage.googleapis.com';
+  }
+  if (updates.maxConcurrentProjects !== undefined) {
+    const val = Number(updates.maxConcurrentProjects);
+    db.serverConfig.maxConcurrentProjects = Math.max(1, Math.min(val || 2, 8));
+  }
+  saveDatabaseSync();
+  return db.serverConfig;
+}
+
 // ─── Server Key Pool Operations ──────────────────────────────────────────────
 
 export function getServerKeys(): string[] {
@@ -321,6 +376,60 @@ export function setServerKeys(keys: string[]): string[] {
   return getServerKeys();
 }
 
+export function updateSingleServerKey(index: number, newKey: string): string[] {
+  const db = getDatabase();
+  const trimmed = newKey.trim();
+  if (!trimmed) {
+    throw new Error('کلید جدید نمی‌تواند خالی باشد.');
+  }
+  if (index >= 0 && index < db.serverKeys.length) {
+    db.serverKeys[index] = trimmed;
+    saveDatabaseSync();
+  } else {
+    // If updating index equal to length, append
+    db.serverKeys.push(trimmed);
+    saveDatabaseSync();
+  }
+  return getServerKeys();
+}
+
+export function deleteSingleServerKey(index: number): string[] {
+  const db = getDatabase();
+  if (index >= 0 && index < db.serverKeys.length) {
+    db.serverKeys.splice(index, 1);
+    if (db.activeKeyIndex >= db.serverKeys.length) {
+      db.activeKeyIndex = Math.max(0, db.serverKeys.length - 1);
+    }
+    saveDatabaseSync();
+  }
+  return getServerKeys();
+}
+
+export function getServerKeysWithDetails(): Array<{
+  index: number;
+  rawKey: string;
+  maskedKey: string;
+  isExhausted: boolean;
+  cooldownRemainingSec: number;
+}> {
+  const allKeys = getServerKeys();
+  const now = Date.now();
+  return allKeys.map((k, index) => {
+    const entry = exhaustedKeysMap.get(k);
+    const isExhausted = entry ? (now - entry.timestamp <= KEY_EXHAUSTION_COOLDOWN_MS) : false;
+    const cooldownRemainingSec = entry && isExhausted ? Math.max(0, Math.ceil((KEY_EXHAUSTION_COOLDOWN_MS - (now - entry.timestamp)) / 1000)) : 0;
+    const len = k.length;
+    const maskedKey = len > 8 ? k.substring(0, 4) + '...' + k.substring(len - 4) : '****';
+    return {
+      index,
+      rawKey: k,
+      maskedKey,
+      isExhausted,
+      cooldownRemainingSec,
+    };
+  });
+}
+
 export function getActiveKeyIndex(): number {
   const db = getDatabase();
   return db.activeKeyIndex || 0;
@@ -334,3 +443,160 @@ export function rotateActiveKeyIndex(): number {
   saveDatabaseSync();
   return db.activeKeyIndex;
 }
+
+// ─── Key Exhaustion & Cooldown Tracking ──────────────────────────────────────
+
+const exhaustedKeysMap = new Map<string, { timestamp: number; reason: string }>();
+const KEY_EXHAUSTION_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes cooldown when token/quota depleted
+
+export function markKeyAsExhausted(key: string, reason: string = 'Quota exhausted (429)'): void {
+  exhaustedKeysMap.set(key, { timestamp: Date.now(), reason });
+  console.log(`[KeyPool] Key marked as EXHAUSTED: ${key.slice(0, 6)}... (${reason}). Will not be queried until rotation cycle resets.`);
+}
+
+export function isKeyExhausted(key: string): boolean {
+  const entry = exhaustedKeysMap.get(key);
+  if (!entry) return false;
+  if (Date.now() - entry.timestamp > KEY_EXHAUSTION_COOLDOWN_MS) {
+    exhaustedKeysMap.delete(key);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Lease an available, non-exhausted key from the pool.
+ * If excludeKeys is provided, avoids choosing a key currently locked by another parallel worker.
+ */
+export function leaseAvailableKey(excludeKeys: string[] = []): { key: string; index: number; total: number } | null {
+  const allKeys = getServerKeys();
+  if (allKeys.length === 0) return null;
+
+  const excludedSet = new Set(excludeKeys);
+  const startIdx = getActiveKeyIndex() % allKeys.length;
+
+  // First pass: find key that is NOT exhausted and NOT in excludeKeys
+  for (let i = 0; i < allKeys.length; i++) {
+    const candidateIdx = (startIdx + i) % allKeys.length;
+    const candidateKey = allKeys[candidateIdx];
+    if (!isKeyExhausted(candidateKey) && !excludedSet.has(candidateKey)) {
+      return { key: candidateKey, index: candidateIdx, total: allKeys.length };
+    }
+  }
+
+  // Second pass: if all free keys are excluded, allow sharing if not exhausted
+  for (let i = 0; i < allKeys.length; i++) {
+    const candidateIdx = (startIdx + i) % allKeys.length;
+    const candidateKey = allKeys[candidateIdx];
+    if (!isKeyExhausted(candidateKey)) {
+      return { key: candidateKey, index: candidateIdx, total: allKeys.length };
+    }
+  }
+
+  // If ALL keys are exhausted, check cooldowns
+  const anyNonExhausted = allKeys.some((k) => !isKeyExhausted(k));
+  if (!anyNonExhausted) {
+    console.warn('[KeyPool] All keys in pool are currently exhausted.');
+    return null;
+  }
+
+  return { key: allKeys[startIdx], index: startIdx, total: allKeys.length };
+}
+
+export function getActiveAvailableKey(): { key: string; index: number; total: number } | null {
+  return leaseAvailableKey([]);
+}
+
+export function getKeyExhaustionStatus(): Array<{ keyMasked: string; isExhausted: boolean; cooldownRemainingSec: number }> {
+  const allKeys = getServerKeys();
+  const now = Date.now();
+  return allKeys.map((k) => {
+    const entry = exhaustedKeysMap.get(k);
+    const isExhausted = entry ? (now - entry.timestamp <= KEY_EXHAUSTION_COOLDOWN_MS) : false;
+    const cooldownRemainingSec = entry && isExhausted ? Math.max(0, Math.ceil((KEY_EXHAUSTION_COOLDOWN_MS - (now - entry.timestamp)) / 1000)) : 0;
+    const len = k.length;
+    const keyMasked = len > 8 ? k.substring(0, 4) + '...' + k.substring(len - 4) : '****';
+    return { keyMasked, isExhausted, cooldownRemainingSec };
+  });
+}
+
+// ─── Project Retranslation & Incomplete Reset ────────────────────────────────
+
+export function resetProjectTranslation(projectId: string, onlyIncomplete: boolean = false): ServerSubtitleProject | null {
+  const db = getDatabase();
+  const project = db.projects.find((p) => p.id === projectId);
+  if (!project) return null;
+
+  if (onlyIncomplete) {
+    // Keep already translated lines, just clear any failed states and queue project
+    project.status = 'queued';
+    project.errorMessage = undefined;
+    project.lastError = undefined;
+    project.failedCueIds = [];
+    project.translatedCues = project.items.filter((i) => Boolean(i.translatedText && i.translatedText.trim())).length;
+  } else {
+    // Retranslate all from scratch
+    project.status = 'queued';
+    project.errorMessage = undefined;
+    project.lastError = undefined;
+    project.failedCueIds = [];
+    project.currentBatchIndex = 0;
+    project.translatedCues = 0;
+    project.completedAt = undefined;
+    project.items.forEach((item) => {
+      item.translatedText = '';
+    });
+  }
+
+  project.updatedAt = new Date().toISOString();
+  saveDatabaseSync();
+  return project;
+}
+
+// ─── Database Backup & Restore Operations ────────────────────────────────────
+
+export function createBackupJson(): string {
+  const db = getDatabase();
+  const backup = {
+    exportedAt: new Date().toISOString(),
+    version: db.version,
+    app: 'SubGame Lab',
+    databaseFilePath: DB_FILE,
+    folders: db.folders,
+    projects: db.projects,
+    stats: db.stats,
+    serverKeysCount: db.serverKeys.length,
+    serverKeys: db.serverKeys,
+  };
+  return JSON.stringify(backup, null, 2);
+}
+
+export function restoreBackupJson(jsonString: string): { success: boolean; foldersCount: number; projectsCount: number; error?: string } {
+  try {
+    const parsed = JSON.parse(jsonString);
+    if (!parsed || !Array.isArray(parsed.folders) || !Array.isArray(parsed.projects)) {
+      return { success: false, foldersCount: 0, projectsCount: 0, error: 'فرمت فایل پشتیبان نامعتبر است.' };
+    }
+
+    const db = getDatabase();
+    db.folders = parsed.folders;
+    db.projects = parsed.projects;
+    if (parsed.stats) db.stats = parsed.stats;
+    if (Array.isArray(parsed.serverKeys) && parsed.serverKeys.length > 0) {
+      db.serverKeys = parsed.serverKeys;
+    }
+    saveDatabaseSync();
+    return {
+      success: true,
+      foldersCount: db.folders.length,
+      projectsCount: db.projects.length,
+    };
+  } catch (err: any) {
+    return { success: false, foldersCount: 0, projectsCount: 0, error: err?.message || 'خطا در خواندن فایل پشتیبان' };
+  }
+}
+
+export function getDatabaseFilePath(): string {
+  return DB_FILE;
+}
+

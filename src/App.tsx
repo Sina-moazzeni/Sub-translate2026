@@ -81,7 +81,6 @@ import { BatchQueueManager } from './components/BatchQueueManager';
 import { ConfigPanel } from './components/ConfigPanel';
 import { TranslationProgress } from './components/TranslationProgress';
 import { SubtitleEditor } from './components/SubtitleEditor';
-import { VideoSubtitlePreview } from './components/VideoSubtitlePreview';
 import { ApiKeyModal } from './components/ApiKeyModal';
 import { BilingualModal } from './components/BilingualModal';
 import { HelpModal } from './components/HelpModal';
@@ -2452,20 +2451,7 @@ export default function App() {
           />
         )}
 
-        {/* Video Player, AI Extraction & Subtitle Style Customizer (Cinema Mode Only) */}
-        {mode === 'cinema' && (
-          <VideoSubtitlePreview
-            items={items}
-            onUpdateItems={(newItems) => setItems(newItems)}
-            uiLang={uiLang}
-            userApiKey={userApiKey}
-            onShowToast={showToast}
-            bilingualConfig={bilingualConfig}
-            setBilingualConfig={handleUpdateBilingualConfig}
-            onOpenBilingualModal={() => setIsBilingualModalOpen(true)}
-            targetLanguage={targetLanguage}
-          />
-        )}
+
 
         {/* Subtitle / Game String Editor & Live Preview */}
         {items.length > 0 && (
