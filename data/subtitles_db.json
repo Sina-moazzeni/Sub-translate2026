@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "folders": [
+    {
+      "id": "folder_cosmic_disclosure_s01",
+      "name": "افشای کیهانی فصل اول",
+      "description": "پوشه پیش‌فرض زیرنویس‌های مستند افشای کیهانی (Cosmic Disclosure Season 1)",
+      "createdAt": "2026-11-01T11:04:46.017Z",
+      "updatedAt": "2026-11-01T11:04:46.017Z"
+    }
+  ],
+  "projects": [
+    {
+      "id": "sub_mvxq3zfg_kl7s",
+      "folderId": "folder_cosmic_disclosure_s01",
+      "name": "Cosmic_Disclosure_S01E01.srt",
+      "format": "srt",
+      "sourceLanguage": "auto",
+      "targetLanguage": "fa",
+      "tone": "cinematic",
+      "status": "idle",
+      "totalCues": 3,
+      "translatedCues": 0,
+      "currentBatchIndex": 0,
+      "totalBatches": 1,
+      "items": [
+        {
+          "id": 1,
+          "startTime": "00:00:01,000",
+          "endTime": "00:00:04,000",
+          "startSeconds": 1,
+          "endSeconds": 4,
+          "originalText": "Welcome to Cosmic Disclosure season one.",
+          "translatedText": ""
+        },
+        {
+          "id": 2,
+          "startTime": "00:00:04,500",
+          "endTime": "00:00:08,200",
+          "startSeconds": 4.5,
+          "endSeconds": 8.2,
+          "originalText": "Tonight we will reveal the secret space program.",
+          "translatedText": ""
+        },
+        {
+          "id": 3,
+          "startTime": "00:00:09,000",
+          "endTime": "00:00:12,000",
+          "startSeconds": 9,
+          "endSeconds": 12,
+          "originalText": "Our guest is Corey Goode.",
+          "translatedText": ""
+        }
+      ],
+      "tokenUsage": {
+        "promptTokens": 0,
+        "candidatesTokens": 0,
+        "totalTokens": 0
+      },
+      "createdAt": "2026-11-01T11:05:02.236Z",
+      "updatedAt": "2026-11-01T11:05:02.236Z"
+    }
+  ],
+  "serverKeys": [],
+  "activeKeyIndex": 0,
+  "stats": {
+    "totalTranslations": 0,
+    "totalTokensUsed": 0
+  }
+}

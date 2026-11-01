@@ -18,6 +18,7 @@ import {
   HelpCircle,
   Film,
   Gamepad2,
+  Folder,
   Send,
   Github,
   Server
@@ -90,7 +91,9 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center justify-between w-full md:w-auto gap-4 shrink-0">
           <div className="flex items-center gap-2.5 sm:gap-3">
             <div className={`w-9 h-9 sm:w-10 sm:h-10 rounded-xl overflow-hidden shadow-sm p-0.5 border transition-all duration-300 shrink-0 ${
-              mode === 'game'
+              mode === 'folders'
+                ? 'border-emerald-500/50 shadow-emerald-500/10'
+                : mode === 'game'
                 ? 'border-purple-500/50 shadow-purple-500/10'
                 : 'border-blue-500/50 shadow-blue-500/10'
             }`}>
@@ -108,23 +111,38 @@ export const Header: React.FC<HeaderProps> = ({
                   {t.appTitle}
                 </h1>
                 <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border hidden sm:inline-flex items-center gap-1 shrink-0 ${
-                  mode === 'game'
+                  mode === 'folders'
+                    ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
+                    : mode === 'game'
                     ? 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20'
                     : 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20'
                 }`}>
-                  {mode === 'game' ? 'Game Mode' : 'Cinema Mode'}
+                  {mode === 'folders' ? 'پوشه‌ها و سرور' : mode === 'game' ? 'Game Mode' : 'Cinema Mode'}
                 </span>
               </div>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 hidden lg:block leading-tight truncate max-w-[220px] xl:max-w-[280px]">
-                {mode === 'cinema' ? t.appSubtitle : t.modeGameDesc}
+                {mode === 'folders' ? 'پوشه‌بندی، دیتابیس و ترجمه پس‌زمینه سرور' : mode === 'cinema' ? t.appSubtitle : t.modeGameDesc}
               </p>
             </div>
           </div>
         </div>
 
-        {/* Center: Standalone Mode Switcher (Cinema vs Game) - Isolated to prevent overlaps */}
+        {/* Center: Standalone Mode Switcher (Folders vs Cinema vs Game) */}
         <div className="flex items-center justify-center shrink-0 w-full md:w-auto">
-          <div className="flex items-center bg-slate-100 dark:bg-slate-900/90 p-1 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
+          <div className="flex items-center bg-slate-100 dark:bg-slate-900/90 p-1 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs gap-1">
+            <button
+              type="button"
+              onClick={() => setMode('folders')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                mode === 'folders'
+                  ? 'bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-500/30'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+              }`}
+              title="پوشه‌بندی، دیتابیس زیرنویس‌ها و ترجمه خودکار در پس‌زمینه سرور (بدون نیاز به باز بودن مرورگر)"
+            >
+              <Folder className="w-3.5 h-3.5" />
+              <span>پوشه‌ها و ترجمه سرور</span>
+            </button>
             <button
               type="button"
               onClick={() => setMode('cinema')}

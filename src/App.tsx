@@ -75,6 +75,7 @@ import { UILanguage, TRANSLATIONS } from './lib/i18n';
 import { SUBGAME_LAB_LOGO } from './assets/logo';
 import { Send, Sparkles, Github } from 'lucide-react';
 import { Header } from './components/Header';
+import { FolderProjectManager } from './components/FolderProjectManager';
 import { FileUpload } from './components/FileUpload';
 import { BatchQueueManager } from './components/BatchQueueManager';
 import { ConfigPanel } from './components/ConfigPanel';
@@ -90,15 +91,16 @@ import { BatchReplaceOptions, BatchReplaceResult } from './components/BatchFindR
 export default function App() {
   const [darkMode, setDarkMode] = useState(true);
 
-  // Operational Mode: Cinema Subtitles vs Game Localization
+  // Operational Mode: Cinema Subtitles vs Game Localization vs Folders Database
   const [mode, setModeState] = useState<AppMode>(() => {
-    return (localStorage.getItem('gemini_app_mode') as AppMode) || 'cinema';
+    return (localStorage.getItem('gemini_app_mode') as AppMode) || 'folders';
   });
 
-  // Sessions dictionary for mode isolation (Cinema Mode vs Game Mode)
+  // Sessions dictionary for mode isolation (Cinema Mode vs Game Mode vs Folders)
   const sessionsRef = useRef<Record<AppMode, ModeSessionState>>({
     cinema: createDefaultSession('cinema'),
     game: createDefaultSession('game'),
+    folders: createDefaultSession('folders'),
   });
   const hasInitializedSessions = useRef<boolean>(false);
 
@@ -479,7 +481,9 @@ export default function App() {
     applySessionState(targetSession);
 
     showToast(
-      newMode === 'game'
+      newMode === 'folders'
+        ? (uiLang === 'en' ? 'Switched to Folders & Background Server Mode' : 'حالت پوشه‌ها و ترجمه پس‌زمینه سرور فعال شد')
+        : newMode === 'game'
         ? (uiLang === 'en' ? 'Switched to Game Localization Mode' : 'حالت بومی‌سازی بازی فعال شد')
         : (uiLang === 'en' ? 'Switched to Cinema Subtitle Mode' : 'حالت زیرنویس سینما فعال شد'),
       'info'
@@ -2270,6 +2274,24 @@ export default function App() {
     showToast(t.allDataReset, 'info');
   };
 
+  // Open Project from Server Folders Database into Cinema Editor
+  const handleOpenProjectInEditor = (project: {
+    id: string;
+    name: string;
+    items: SubtitleItem[];
+    format: SubtitleFormat;
+    rawHeader?: string;
+  }) => {
+    setFileName(project.name);
+    setFileSize(0);
+    setItems(project.items);
+    setSourceFormat(project.format);
+    setTargetFormat(project.format);
+    setRawHeader(project.rawHeader);
+    setMode('cinema');
+    showToast(`زیرنویس "${project.name}" در ادیتور سینمایی بارگذاری شد.`, 'success');
+  };
+
   return (
     <div className={`min-h-screen ${darkMode ? 'dark bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'} transition-colors`}>
       
@@ -2303,9 +2325,16 @@ export default function App() {
 
       {/* Main Container */}
       <main className="max-w-7xl mx-auto px-4 lg:px-8 py-6 flex flex-col gap-6">
-        
-        {/* Upload Zone with Multi-file Selection */}
-        <FileUpload
+        {mode === 'folders' ? (
+          <FolderProjectManager
+            uiLang={uiLang}
+            onOpenProjectInEditor={handleOpenProjectInEditor}
+            onShowToast={showToast}
+          />
+        ) : (
+          <>
+            {/* Upload Zone with Multi-file Selection */}
+            <FileUpload
           mode={mode}
           onFileSelect={(buffer, name, size, enc) => processBufferData(buffer, name, size, mode, enc)}
           onFilesSelect={(files, enc) => handleFilesSelect(files, enc)}
@@ -2458,6 +2487,8 @@ export default function App() {
             onOpenBilingualModal={() => setIsBilingualModalOpen(true)}
             bilingualConfig={bilingualConfig}
           />
+        )}
+          </>
         )}
 
       </main>

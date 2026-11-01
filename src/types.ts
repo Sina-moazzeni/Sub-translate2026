@@ -2,7 +2,7 @@
  * Types for Universal Subtitle & Game Localization Translator
  */
 
-export type AppMode = 'cinema' | 'game';
+export type AppMode = 'cinema' | 'game' | 'folders';
 
 export type TranslationMethod = 'batch' | 'stream';
 

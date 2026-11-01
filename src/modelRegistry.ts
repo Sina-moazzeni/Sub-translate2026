@@ -287,7 +287,7 @@ export const TRANSCRIPTION_MODELS: ModelDefinition[] = ALL_MODELS.filter(
   (m) => m.capability === 'transcription' && m.status !== 'deprecated'
 );
 
-export const DEFAULT_TRANSLATION_MODEL_ID = 'gemini-3.8-flash';
+export const DEFAULT_TRANSLATION_MODEL_ID = 'gemini-3.1-flash-lite';
 export const DEFAULT_TRANSCRIPTION_MODEL_ID = 'gemini-3.5-transcribe';
 
 /**
@@ -309,22 +309,27 @@ export function resolveModelId(inputModel?: string): string {
   const trimmed = inputModel.trim();
 
   // Alias mappings
-  switch (trimmed) {
+  switch (trimmed.toLowerCase()) {
+    case 'gemini-3.5-flash-lite':
+    case 'gemini 3.5 flash lite':
+    case '3.5 flash lite':
+    case 'flash lite':
+    case 'flash-lite':
+    case 'gemini-flash-lite':
+    case 'gemini-2.5-flash-lite':
+    case 'gemini-3.1-flash-lite':
+      return 'gemini-3.1-flash-lite';
     case 'gemini-3.1-pro':
-      return 'gemini-3.1-pro-preview';
     case 'gemini-2.5-pro':
-      return 'gemini-3.1-pro-preview';
-    case 'gemini-2.5-flash':
-      return 'gemini-3.8-flash';
     case 'gemini-pro':
       return 'gemini-3.1-pro-preview';
+    case 'gemini-2.5-flash':
     case 'gemini-flash':
-      return 'gemini-3.8-flash';
     case 'gemini-3.8-flash':
+      return 'gemini-3.8-flash';
     case 'gemini-3.7-flash':
     case 'gemini-3.6-flash':
     case 'gemini-3.5-flash':
-    case 'gemini-3.1-flash-lite':
     case 'gemini-3.1-pro-preview':
     case 'gemini-live-stream':
     case 'gemini-3.5-transcribe':
@@ -340,19 +345,25 @@ export function resolveModelId(inputModel?: string): string {
  */
 export function getTranslationFallbackChain(primaryModelId: string): string[] {
   const resolved = resolveModelId(primaryModelId);
-  const chain: string[] = [];
+  
+  // When user configures Flash Lite (or 3.5 flash lite), strictly keep it on Flash Lite
+  // and rotate across multiple keys without falling back to heavier models
+  if (resolved === 'gemini-3.1-flash-lite') {
+    return ['gemini-3.1-flash-lite'];
+  }
 
+  const chain: string[] = [];
   if (resolved !== 'gemini-live-stream') {
     chain.push(resolved);
   }
 
-  // Fallback priority: Flagship Flash -> High Flash -> Stable Flash -> Flash Lite -> Pro Preview
+  // Fallback priority: Flash Lite -> Flagship Flash -> High Flash -> Stable Flash
   const standardFallbacks = [
+    'gemini-3.1-flash-lite',
     'gemini-3.8-flash',
     'gemini-3.7-flash',
     'gemini-3.6-flash',
     'gemini-3.5-flash',
-    'gemini-3.1-flash-lite',
   ];
 
   for (const m of standardFallbacks) {

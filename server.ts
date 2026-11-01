@@ -19,6 +19,34 @@ import {
   extractJsonFromText,
   classifyCustomProviderError
 } from './src/lib/customProviderService';
+import JSZip from 'jszip';
+import { parseSubtitleFile, fixRTLPunctuation } from './src/lib/subtitleParser';
+import {
+  getAllFolders,
+  getFolderById,
+  createFolder,
+  updateFolder,
+  deleteFolder,
+  getProjectsByFolder,
+  getAllProjects,
+  getProjectById,
+  createProject,
+  updateProject,
+  deleteProject,
+  getServerKeys,
+  setServerKeys,
+  addServerKeys,
+  ServerSubtitleProject
+} from './src/server/database';
+import {
+  startBackgroundWorker,
+  stopBackgroundWorker,
+  getWorkerStatus,
+  queueFolderForTranslation,
+  pauseFolderTranslation,
+  queueSingleProject,
+  pauseSingleProject
+} from './src/server/backgroundWorker';
 
 dotenv.config();
 
@@ -2167,6 +2195,322 @@ app.post('/api/custom-provider/test', async (req, res) => {
 });
 
 
+// ─── Subtitle Folder & Background Translation Endpoints ───────────────────────
+
+function secondsToVTTTime(seconds: number): string {
+  const s = Math.max(0, isNaN(seconds) ? 0 : seconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  const ms = Math.floor((s % 1) * 1000);
+  const pad = (n: number, size = 2) => String(n).padStart(size, '0');
+  return `${pad(h)}:${pad(m)}:${pad(sec)}.${pad(ms, 3)}`;
+}
+
+function exportServerProjectToVTT(project: ServerSubtitleProject): string {
+  const header = project.rawHeader && project.rawHeader.startsWith('WEBVTT') ? project.rawHeader : 'WEBVTT';
+  const isRTL = ['fa', 'ar', 'he', 'ur'].includes(project.targetLanguage || 'fa');
+
+  const cues = project.items.map((item, idx) => {
+    let text = item.translatedText.trim() || item.originalText.trim();
+    if (isRTL && item.translatedText.trim()) {
+      text = fixRTLPunctuation(text);
+    }
+    const start = secondsToVTTTime(item.startSeconds);
+    const end = secondsToVTTTime(item.endSeconds);
+    const settings = item.styleTags ? ` ${item.styleTags}` : '';
+    const id = item.cueId || String(item.id || idx + 1);
+    return `${id}\n${start} --> ${end}${settings}\n${text}\n`;
+  }).join('\n');
+
+  return `${header}\n\n${cues}`;
+}
+
+// 1. Get all folders with stats
+app.get('/api/folders', (req, res) => {
+  try {
+    const folders = getAllFolders();
+    return res.json({ success: true, folders });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to list folders' });
+  }
+});
+
+// 2. Create new folder (e.g. "افشای کیهانی فصل اول")
+app.post('/api/folders', (req, res) => {
+  try {
+    const { name, description } = req.body || {};
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ success: false, error: 'نام پوشه الزامی است.' });
+    }
+    const folder = createFolder(name, description);
+    return res.json({ success: true, folder });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to create folder' });
+  }
+});
+
+// 3. Update folder name or description
+app.put('/api/folders/:id', (req, res) => {
+  try {
+    const { name, description } = req.body || {};
+    const updated = updateFolder(req.params.id, { name, description });
+    if (!updated) return res.status(404).json({ success: false, error: 'پوشه یافت نشد.' });
+    return res.json({ success: true, folder: updated });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to update folder' });
+  }
+});
+
+// 4. Delete folder and all its contents
+app.delete('/api/folders/:id', (req, res) => {
+  try {
+    const deleted = deleteFolder(req.params.id);
+    if (!deleted) return res.status(404).json({ success: false, error: 'پوشه یافت نشد.' });
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to delete folder' });
+  }
+});
+
+// 5. Get all subtitle projects in a folder
+app.get('/api/folders/:folderId/projects', (req, res) => {
+  try {
+    const projects = getProjectsByFolder(req.params.folderId);
+    return res.json({ success: true, projects });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to fetch folder projects' });
+  }
+});
+
+// 6. Upload one or multiple subtitle files into a folder
+app.post('/api/folders/:folderId/upload', (req, res) => {
+  try {
+    const { folderId } = req.params;
+    const folder = getFolderById(folderId);
+    if (!folder) return res.status(404).json({ success: false, error: 'پوشه مورد نظر یافت نشد.' });
+
+    const { files, targetLanguage = 'fa', tone = 'cinematic', customPrompt, autoQueue = true } = req.body || {};
+
+    if (!files || !Array.isArray(files) || files.length === 0) {
+      return res.status(400).json({ success: false, error: 'هیچ فایلی برای آپلود ارسال نشده است.' });
+    }
+
+    const createdProjects: ServerSubtitleProject[] = [];
+
+    for (const file of files) {
+      let items = file.items;
+      let format = file.format || 'srt';
+      let rawHeader = file.rawHeader;
+
+      // If raw text/content is provided, parse it on the server
+      if ((!items || items.length === 0) && file.content) {
+        const parsed = parseSubtitleFile(file.content, file.name);
+        items = parsed.items;
+        format = parsed.format;
+        rawHeader = parsed.rawHeader;
+      }
+
+      if (!items || items.length === 0) continue;
+
+      const project = createProject({
+        folderId,
+        name: file.name,
+        format: format as any,
+        rawHeader,
+        sourceLanguage: file.sourceLanguage || 'auto',
+        targetLanguage,
+        tone,
+        customPrompt,
+        items,
+        autoQueue,
+      });
+
+      createdProjects.push(project);
+    }
+
+    return res.json({
+      success: true,
+      count: createdProjects.length,
+      projects: createdProjects,
+    });
+  } catch (err: any) {
+    console.error('[Upload to folder error]:', err);
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to upload subtitles to folder' });
+  }
+});
+
+// 7. Start/queue background translation for all pending files in a folder
+app.post('/api/folders/:folderId/start', (req, res) => {
+  try {
+    const queuedCount = queueFolderForTranslation(req.params.folderId);
+    return res.json({ success: true, queuedCount, message: `تعداد ${queuedCount} فایل به صف ترجمه پس‌زمینه اضافه شد.` });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to start folder translation' });
+  }
+});
+
+// 8. Pause background translation for a folder
+app.post('/api/folders/:folderId/pause', (req, res) => {
+  try {
+    const pausedCount = pauseFolderTranslation(req.params.folderId);
+    return res.json({ success: true, pausedCount, message: `ترجمه پس‌زمینه ${pausedCount} فایل متوقف شد.` });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to pause folder translation' });
+  }
+});
+
+// 9. Batch VTT Export for entire folder (ZIP)
+app.get('/api/folders/:folderId/export/vtt', async (req, res) => {
+  try {
+    const folder = getFolderById(req.params.folderId);
+    if (!folder) return res.status(404).json({ error: 'Folder not found' });
+
+    const projects = getProjectsByFolder(req.params.folderId);
+    if (projects.length === 0) {
+      return res.status(400).json({ error: 'هیچ زیرنویسی در این پوشه وجود ندارد.' });
+    }
+
+    const zip = new JSZip();
+    for (const project of projects) {
+      const vttContent = exportServerProjectToVTT(project);
+      const baseName = project.name.substring(0, project.name.lastIndexOf('.')) || project.name;
+      const targetLang = project.targetLanguage || 'fa';
+      const outName = `${baseName}_${targetLang}.vtt`;
+      zip.file(outName, vttContent);
+    }
+
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    const safeFolderName = encodeURIComponent(folder.name.replace(/[^a-zA-Z0-9\u0600-\u06FF_-]/g, '_'));
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeFolderName}_VTT.zip"; filename*=UTF-8''${safeFolderName}_VTT.zip`);
+    return res.send(zipBuffer);
+  } catch (err: any) {
+    console.error('[Export VTT ZIP Error]:', err);
+    return res.status(500).json({ error: 'Failed to generate VTT ZIP archive' });
+  }
+});
+
+// 10. Single Project Details
+app.get('/api/projects/:id', (req, res) => {
+  try {
+    const project = getProjectById(req.params.id);
+    if (!project) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    return res.json({ success: true, project });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 11. Update Project (e.g. edited items, tone)
+app.put('/api/projects/:id', (req, res) => {
+  try {
+    const updated = updateProject(req.params.id, req.body);
+    if (!updated) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    return res.json({ success: true, project: updated });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 12. Delete single project
+app.delete('/api/projects/:id', (req, res) => {
+  try {
+    const deleted = deleteProject(req.params.id);
+    if (!deleted) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 13. Start single project background translation
+app.post('/api/projects/:id/start', (req, res) => {
+  try {
+    const success = queueSingleProject(req.params.id);
+    if (!success) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    return res.json({ success: true, message: 'فایل در صف ترجمه پس‌زمینه سرور قرار گرفت.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 14. Pause single project background translation
+app.post('/api/projects/:id/pause', (req, res) => {
+  try {
+    const success = pauseSingleProject(req.params.id);
+    if (!success) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    return res.json({ success: true, message: 'ترجمه پس‌زمینه متوقف شد.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 15. Single project VTT download
+app.get('/api/projects/:id/export/vtt', (req, res) => {
+  try {
+    const project = getProjectById(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+
+    const vttContent = exportServerProjectToVTT(project);
+    const baseName = project.name.substring(0, project.name.lastIndexOf('.')) || project.name;
+    const fileName = `${baseName}_${project.targetLanguage || 'fa'}.vtt`;
+    res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
+    return res.send(vttContent);
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to export VTT' });
+  }
+});
+
+// 16. Get server key rotation pool
+app.get('/api/server/keys', (req, res) => {
+  try {
+    const allKeys = getServerKeys();
+    const masked = allKeys.map((k) => {
+      const len = k.length;
+      if (len <= 8) return '****';
+      return k.substring(0, 4) + '...' + k.substring(len - 4);
+    });
+    return res.json({
+      success: true,
+      count: allKeys.length,
+      keys: masked,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 17. Add / update server keys
+app.post('/api/server/keys', (req, res) => {
+  try {
+    const { keys, mode = 'append' } = req.body || {};
+    if (!Array.isArray(keys)) {
+      return res.status(400).json({ success: false, error: 'Keys array required' });
+    }
+    const updatedKeys = mode === 'replace' ? setServerKeys(keys) : addServerKeys(keys);
+    return res.json({
+      success: true,
+      count: updatedKeys.length,
+      message: `تعداد ${updatedKeys.length} کلید API در استخر سرور فعال شد.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 18. Background worker status check
+app.get('/api/background/status', (req, res) => {
+  try {
+    const status = getWorkerStatus();
+    return res.json({ success: true, status });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+
 // Health check route
 app.get('/api/health', (req, res) => {
   const hasServerKey = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
@@ -2320,6 +2664,8 @@ async function startServer() {
   // instead of a forced kill that shows up as a "Crashed" deployment.
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server listening on http://0.0.0.0:${PORT} (PID: ${process.pid}, mode: ${isProduction ? 'production' : 'development'})`);
+    // Start autonomous server-side background subtitle translation loop
+    startBackgroundWorker();
   });
 
   // FIX (DEPLOY): graceful shutdown for Railway-style lifecycle management.
@@ -2331,6 +2677,7 @@ async function startServer() {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[Server] ${signal} received — starting graceful shutdown...`);
+    stopBackgroundWorker();
 
     // Safety net: if something still keeps the process alive, force the exit so the
     // platform is never left hanging.
