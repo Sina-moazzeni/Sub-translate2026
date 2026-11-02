@@ -45,6 +45,7 @@ import {
   restoreBackupJson,
   getDatabaseFilePath,
   getKeyExhaustionStatus,
+  batchReplaceInFolder,
   ServerSubtitleProject
 } from './src/server/database';
 import {
@@ -179,9 +180,14 @@ const TONE_PROMPTS: Record<string, string> = {
   cinematic: 'سینمایی و دراماتیک (لحن شیوا، دراماتیک و مناسب دوبله و فیلم‌های سینمایی فاخر)',
   conversational: 'عامیانه و گفتاری (زبان روزمره، صمیمی، روانی مکالمات خیابانی، اصطلاحات روز و ولاگ)',
   formal: 'رسمی، کتابی و دقیق (وفاداری کامل به واژگان با ادبیات معیار)',
-  humorous: 'طنز و شوخ‌طبعانه (استفاده طبیعی و بدون سانسور از جوک‌ها، شوخی‌های بزرگسالانه، کنایه‌ها، متلک‌ها و اصطلاحات طنز متناسب با زبان و فرهنگ مقصد)',
-  educational: 'آموزشی و علمی (رعایت ترمینولوژی تخصصی، صراحت و دقت مستندهای علمی)',
+  documentary: 'مستند علمی و پژوهشی (ویژه مستندهای علمی، تاریخی و افشای کیهانی با اصطلاحات دقیق تخصصی و لحن متین پژوهشی)',
   epic: 'حماسی و تاریخی (مناسب بازی‌های نقش‌آفرینی RPG، بازی‌های ویدیویی، محتوای تاریخی، افسانه‌ای و فانتزی با لحن حماسی و اساطیری فاخر)',
+  action: 'اکشن و مهیج (جملات کوتاه، پرانرژی، کوبنده و ضربتی مناسب فیلم‌های اکشن، هیجانی و پلیسی)',
+  humorous: 'طنز و شوخ‌طبعانه (استفاده طبیعی و بدون سانسور از جوک‌ها، شوخی‌ها، کنایه‌ها و متلک‌های طنز متناسب با زبان و فرهنگ مقصد)',
+  horror: 'ترسناک و معمایی (فضای مرموز، رازآلود، تعلیق‌دار و دلهره‌آور مناسب فیلم‌های وحشت و ماورایی)',
+  educational: 'آموزشی و درسی (رعایت ترمینولوژی تخصصی، صراحت، شفافیت و دقت مفاهیم علمی)',
+  poetic: 'ادبی و شاعرانه (واژه‌گزینی فاخر، آرایه‌های کلامی و ادبیات شکوهمند کلاسیک)',
+  animation: 'کودکانه و انیمیشن (زبان شیرین، ساده، کودکانه و پرنشاط)',
   custom: 'دستورالعمل و لحن اختصاصی کاربر (پیروی دقیق از قوانین سفارشی و اصطلاحات اختصاصی کاربر)',
 };
 
@@ -2217,6 +2223,16 @@ function secondsToVTTTime(seconds: number): string {
   return `${pad(h)}:${pad(m)}:${pad(sec)}.${pad(ms, 3)}`;
 }
 
+function secondsToSRTTime(seconds: number): string {
+  const s = Math.max(0, isNaN(seconds) ? 0 : seconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  const ms = Math.floor((s % 1) * 1000);
+  const pad = (n: number, size = 2) => String(n).padStart(size, '0');
+  return `${pad(h)}:${pad(m)}:${pad(sec)},${pad(ms, 3)}`;
+}
+
 function exportServerProjectToVTT(project: ServerSubtitleProject): string {
   const header = project.rawHeader && project.rawHeader.startsWith('WEBVTT') ? project.rawHeader : 'WEBVTT';
   const isRTL = ['fa', 'ar', 'he', 'ur'].includes(project.targetLanguage || 'fa');
@@ -2236,6 +2252,20 @@ function exportServerProjectToVTT(project: ServerSubtitleProject): string {
   return `${header}\n\n${cues}`;
 }
 
+function exportServerProjectToSRT(project: ServerSubtitleProject): string {
+  const isRTL = ['fa', 'ar', 'he', 'ur'].includes(project.targetLanguage || 'fa');
+  return project.items.map((item, idx) => {
+    let text = item.translatedText.trim() || item.originalText.trim();
+    if (isRTL && item.translatedText.trim()) {
+      text = fixRTLPunctuation(text);
+    }
+    const start = secondsToSRTTime(item.startSeconds);
+    const end = secondsToSRTTime(item.endSeconds);
+    const id = item.cueId || String(item.id || idx + 1);
+    return `${id}\n${start} --> ${end}\n${text}\n`;
+  }).join('\n');
+}
+
 // 1. Get all folders with stats
 app.get('/api/folders', (req, res) => {
   try {
@@ -2246,25 +2276,25 @@ app.get('/api/folders', (req, res) => {
   }
 });
 
-// 2. Create new folder (e.g. "افشای کیهانی فصل اول")
+// 2. Create new folder (with tone support)
 app.post('/api/folders', (req, res) => {
   try {
-    const { name, description } = req.body || {};
+    const { name, description, tone } = req.body || {};
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ success: false, error: 'نام پوشه الزامی است.' });
     }
-    const folder = createFolder(name, description);
+    const folder = createFolder(name, description, tone);
     return res.json({ success: true, folder });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to create folder' });
   }
 });
 
-// 3. Update folder name or description
+// 3. Update folder name, description, or tone
 app.put('/api/folders/:id', (req, res) => {
   try {
-    const { name, description } = req.body || {};
-    const updated = updateFolder(req.params.id, { name, description });
+    const { name, description, tone } = req.body || {};
+    const updated = updateFolder(req.params.id, { name, description, tone });
     if (!updated) return res.status(404).json({ success: false, error: 'پوشه یافت نشد.' });
     return res.json({ success: true, folder: updated });
   } catch (err: any) {
@@ -2293,14 +2323,15 @@ app.get('/api/folders/:folderId/projects', (req, res) => {
   }
 });
 
-// 6. Upload one or multiple subtitle files into a folder
+// 6. Upload one or multiple subtitle files into a folder (inherits folder tone automatically)
 app.post('/api/folders/:folderId/upload', (req, res) => {
   try {
     const { folderId } = req.params;
     const folder = getFolderById(folderId);
     if (!folder) return res.status(404).json({ success: false, error: 'پوشه مورد نظر یافت نشد.' });
 
-    const { files, targetLanguage = 'fa', tone = 'cinematic', customPrompt, autoQueue = true } = req.body || {};
+    const { files, targetLanguage = 'fa', tone, customPrompt, autoQueue = true } = req.body || {};
+    const effectiveTone = tone || folder.tone || 'cinematic';
 
     if (!files || !Array.isArray(files) || files.length === 0) {
       return res.status(400).json({ success: false, error: 'هیچ فایلی برای آپلود ارسال نشده است.' });
@@ -2330,7 +2361,7 @@ app.post('/api/folders/:folderId/upload', (req, res) => {
         rawHeader,
         sourceLanguage: file.sourceLanguage || 'auto',
         targetLanguage,
-        tone,
+        tone: effectiveTone,
         customPrompt,
         items,
         autoQueue,
@@ -2398,6 +2429,68 @@ app.get('/api/folders/:folderId/export/vtt', async (req, res) => {
   } catch (err: any) {
     console.error('[Export VTT ZIP Error]:', err);
     return res.status(500).json({ error: 'Failed to generate VTT ZIP archive' });
+  }
+});
+
+// 9b. Batch SRT Export for entire folder (ZIP)
+app.get('/api/folders/:folderId/export/srt', async (req, res) => {
+  try {
+    const folder = getFolderById(req.params.folderId);
+    if (!folder) return res.status(404).json({ error: 'Folder not found' });
+
+    const projects = getProjectsByFolder(req.params.folderId);
+    if (projects.length === 0) {
+      return res.status(400).json({ error: 'هیچ زیرنویسی در این پوشه وجود ندارد.' });
+    }
+
+    const zip = new JSZip();
+    for (const project of projects) {
+      const srtContent = exportServerProjectToSRT(project);
+      const baseName = project.name.substring(0, project.name.lastIndexOf('.')) || project.name;
+      const targetLang = project.targetLanguage || 'fa';
+      const outName = `${baseName}_${targetLang}.srt`;
+      zip.file(outName, srtContent);
+    }
+
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    const safeFolderName = encodeURIComponent(folder.name.replace(/[^a-zA-Z0-9\u0600-\u06FF_-]/g, '_'));
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeFolderName}_SRT.zip"; filename*=UTF-8''${safeFolderName}_SRT.zip`);
+    return res.send(zipBuffer);
+  } catch (err: any) {
+    console.error('[Export SRT ZIP Error]:', err);
+    return res.status(500).json({ error: 'Failed to generate SRT ZIP archive' });
+  }
+});
+
+// 9c. Global Find & Replace in all subtitles of a specific folder
+app.post('/api/folders/:folderId/batch-replace', (req, res) => {
+  try {
+    const { folderId } = req.params;
+    const folder = getFolderById(folderId);
+    if (!folder) return res.status(404).json({ success: false, error: 'پوشه یافت نشد.' });
+
+    const { findText, replaceText, scope = 'translated', matchCase = false, wholeWord = false, useRegex = false } = req.body || {};
+    if (!findText || typeof findText !== 'string' || !findText.trim()) {
+      return res.status(400).json({ success: false, error: 'متن جستجو الزامی است.' });
+    }
+
+    const result = batchReplaceInFolder(folderId, {
+      findText: findText.trim(),
+      replaceText: typeof replaceText === 'string' ? replaceText : '',
+      scope,
+      matchCase: Boolean(matchCase),
+      wholeWord: Boolean(wholeWord),
+      useRegex: Boolean(useRegex),
+    });
+
+    return res.json({
+      success: true,
+      ...result,
+      message: `تعداد ${result.totalReplacements} مورد با موفقیت در ${result.affectedFilesCount} فیلم پوشه «${folder.name}» جایگزین و ذخیره شد.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to replace in folder' });
   }
 });
 
@@ -2554,6 +2647,23 @@ app.get('/api/projects/:id/export/vtt', (req, res) => {
     return res.send(vttContent);
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to export VTT' });
+  }
+});
+
+// 15b. Single project SRT download
+app.get('/api/projects/:id/export/srt', (req, res) => {
+  try {
+    const project = getProjectById(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+
+    const srtContent = exportServerProjectToSRT(project);
+    const baseName = project.name.substring(0, project.name.lastIndexOf('.')) || project.name;
+    const fileName = `${baseName}_${project.targetLanguage || 'fa'}.srt`;
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
+    return res.send(srtContent);
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to export SRT' });
   }
 });
 

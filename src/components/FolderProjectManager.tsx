@@ -44,16 +44,19 @@ import {
   ArrowLeft,
   Search,
   MoveRight,
-  ExternalLink
+  ExternalLink,
+  Replace
 } from 'lucide-react';
 import { SubtitleItem, SubtitleFormat, ToneOption } from '../types';
 import { parseSubtitleFile } from '../lib/subtitleParser';
 import { UILanguage } from '../lib/i18n';
+import { TONE_OPTIONS } from '../constants';
 
 export interface ServerFolderItem {
   id: string;
   name: string;
   description?: string;
+  tone?: string;
   createdAt: string;
   updatedAt: string;
   projectCount: number;
@@ -173,10 +176,27 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
   const [isNewFolderOpen, setIsNewFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [newFolderDesc, setNewFolderDesc] = useState('');
+  const [newFolderTone, setNewFolderTone] = useState<ToneOption>('cinematic');
 
   const [isEditFolderOpen, setIsEditFolderOpen] = useState(false);
   const [editFolderName, setEditFolderName] = useState('');
   const [editFolderDesc, setEditFolderDesc] = useState('');
+  const [editFolderTone, setEditFolderTone] = useState<ToneOption>('cinematic');
+
+  // Folder-level Global Find & Replace Modal
+  const [isFolderBatchReplaceOpen, setIsFolderBatchReplaceOpen] = useState(false);
+  const [batchFindText, setBatchFindText] = useState('');
+  const [batchReplaceText, setBatchReplaceText] = useState('');
+  const [batchScope, setBatchScope] = useState<'translated' | 'both'>('translated');
+  const [batchMatchCase, setBatchMatchCase] = useState(false);
+  const [batchWholeWord, setBatchWholeWord] = useState(false);
+  const [batchUseRegex, setBatchUseRegex] = useState(false);
+  const [isExecutingReplace, setIsExecutingReplace] = useState(false);
+  const [replaceResult, setReplaceResult] = useState<{
+    totalOccurrences: number;
+    affectedProjectsCount: number;
+    affectedProjects: string[];
+  } | null>(null);
 
   // Keys Management Modal
   const [isKeysModalOpen, setIsKeysModalOpen] = useState(false);
@@ -227,6 +247,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
   const [uploadTone, setUploadTone] = useState<ToneOption>('cinematic');
   const [autoQueueOnUpload, setAutoQueueOnUpload] = useState(true);
   const [isZippingFolder, setIsZippingFolder] = useState(false);
+  const [isZippingSRT, setIsZippingSRT] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -405,7 +426,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       const res = await fetch('/api/folders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newFolderName, description: newFolderDesc }),
+        body: JSON.stringify({ name: newFolderName, description: newFolderDesc, tone: newFolderTone }),
       });
       const data = await res.json();
       if (data.success && data.folder) {
@@ -414,6 +435,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
         setActiveView('inside_folder');
         setNewFolderName('');
         setNewFolderDesc('');
+        setNewFolderTone('cinematic');
         setIsNewFolderOpen(false);
         onShowToast(`پوشه "${data.folder.name}" ساخته شد و وارد آن شدید. اکنون فایل‌های زیرنویس را آپلود کنید.`, 'success');
       }
@@ -431,18 +453,93 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       const res = await fetch(`/api/folders/${selectedFolderId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: editFolderName, description: editFolderDesc }),
+        body: JSON.stringify({ name: editFolderName, description: editFolderDesc, tone: editFolderTone }),
       });
       const data = await res.json();
       if (data.success && data.folder) {
         setFolders((prev) =>
-          prev.map((f) => (f.id === selectedFolderId ? { ...f, name: data.folder.name, description: data.folder.description } : f))
+          prev.map((f) => (f.id === selectedFolderId ? { ...f, name: data.folder.name, description: data.folder.description, tone: data.folder.tone } : f))
         );
         setIsEditFolderOpen(false);
-        onShowToast('اطلاعات پوشه به‌روزرسانی شد.', 'success');
+        onShowToast('اطلاعات و لحن پوشه به‌روزرسانی شد.', 'success');
+        await fetchProjects(selectedFolderId);
       }
     } catch {
       onShowToast('خطا در ویرایش پوشه', 'error');
+    }
+  };
+
+  // Quick Tone update directly from Folder Header Toolbar
+  const handleUpdateFolderTone = async (newTone: ToneOption) => {
+    if (!selectedFolderId) return;
+    try {
+      const res = await fetch(`/api/folders/${selectedFolderId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tone: newTone }),
+      });
+      const data = await res.json();
+      if (data.success && data.folder) {
+        setFolders((prev) =>
+          prev.map((f) => (f.id === selectedFolderId ? { ...f, tone: data.folder.tone } : f))
+        );
+        onShowToast(`لحن پوشه به «${TONE_OPTIONS.find(t => t.id === newTone)?.labelFa || newTone}» تغییر یافت و بر روی تمام فایل‌های این پوشه اعمال شد.`, 'success');
+        await fetchProjects(selectedFolderId);
+      }
+    } catch {
+      onShowToast('خطا در به‌روزرسانی لحن پوشه', 'error');
+    }
+  };
+
+  // Bulk SRT ZIP Download for folder
+  const handleDownloadFolderSRTZip = () => {
+    if (!selectedFolderId) return;
+    setIsZippingSRT(true);
+    const link = document.createElement('a');
+    link.href = `/api/folders/${selectedFolderId}/export/srt`;
+    link.download = '';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => setIsZippingSRT(false), 2000);
+    onShowToast('دانلود خروجی گروهی SRT شروع شد...', 'info');
+  };
+
+  // Folder-level Global Find & Replace
+  const handleExecuteFolderBatchReplace = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedFolderId || !batchFindText) {
+      onShowToast('لطفاً عبارت مورد نظر برای جستجو را وارد کنید.', 'error');
+      return;
+    }
+    setIsExecutingReplace(true);
+    setReplaceResult(null);
+    try {
+      const res = await fetch(`/api/folders/${selectedFolderId}/batch-replace`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          findText: batchFindText,
+          replaceText: batchReplaceText,
+          scope: batchScope,
+          matchCase: batchMatchCase,
+          wholeWord: batchWholeWord,
+          useRegex: batchUseRegex,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setReplaceResult(data);
+        onShowToast(data.message || `جایگزینی سراسری انجام شد: ${data.totalOccurrences} مورد در ${data.affectedProjectsCount} فایل جایگزین شد.`, 'success');
+        await fetchProjects(selectedFolderId);
+        await fetchAllProjects();
+      } else {
+        onShowToast(data.error || 'خطا در اجرای جایگزینی سراسری', 'error');
+      }
+    } catch {
+      onShowToast('خطا در ارتباط با سرور برای جایگزینی سراسری', 'error');
+    } finally {
+      setIsExecutingReplace(false);
     }
   };
 
@@ -1314,10 +1411,11 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
               <div className="flex flex-col">
                 <div className="flex items-center gap-2.5 flex-wrap">
                   <h3 className="text-base font-bold text-white flex items-center gap-2">
-                    <span>{selectedFolder.name}</span>
+                    <span>صفحه فیلم‌ها و زیرنویس‌ها:</span>
+                    <span className="text-amber-400">{selectedFolder.name}</span>
                   </h3>
                   <span className="text-xs font-mono font-bold px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                    {projects.length} زیرنویس در این پوشه
+                    {projects.length} فیلم/قسمت در این پوشه
                   </span>
                 </div>
                 {selectedFolder.description ? (
@@ -1325,6 +1423,26 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 ) : (
                   <p className="text-xs text-slate-400 mt-1">پوشه اختصاصی برای نگهداری و ترجمه فایل‌های این دسته‌بندی</p>
                 )}
+
+                {/* FOLDER-LEVEL TONE SELECTOR (تنظیم لحن برای کل پوشه) */}
+                <div className="flex items-center gap-2 mt-2.5 pt-2 border-t border-slate-800/80">
+                  <span className="text-xs text-slate-300 flex items-center gap-1 font-semibold">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                    <span>لحن ترجمه این پوشه:</span>
+                  </span>
+                  <select
+                    value={selectedFolder.tone || 'cinematic'}
+                    onChange={(e) => handleUpdateFolderTone(e.target.value as ToneOption)}
+                    className="bg-slate-950 border border-indigo-500/40 rounded-lg px-2.5 py-1 text-xs text-amber-300 font-bold focus:outline-none focus:border-indigo-400 cursor-pointer shadow-xs"
+                    title="تغییر لحن کل فایل‌های زیرنویس این پوشه"
+                  >
+                    {TONE_OPTIONS.map((t) => (
+                      <option key={t.id} value={t.id} className="bg-slate-900 text-slate-100">
+                        {t.labelFa}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
             </div>
 
@@ -1334,33 +1452,45 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
               <button
                 type="button"
                 onClick={handleStartFolder}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 transition-all"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 transition-all cursor-pointer"
                 title="شروع ترجمه خودکار تمام فایل‌های این پوشه در پس‌زمینه سرور"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
-                <span>شروع ترجمه پوشه</span>
+                <span>شروع ترجمه فیلم‌ها</span>
               </button>
 
               {/* Resume Incomplete */}
               <button
                 type="button"
                 onClick={handleResumeFolder}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 transition-colors cursor-pointer"
                 title="ادامه ترجمه سطرهای باقی‌مانده تمام فایل‌های ناقص پوشه"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
-                <span>ادامه فایل‌های ناقص</span>
+                <span>ادامه فیلم‌های ناقص</span>
               </button>
 
               {/* Pause Folder */}
               <button
                 type="button"
                 onClick={handlePauseFolder}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-colors cursor-pointer"
                 title="توقف موقت ترجمه این پوشه"
               >
                 <Pause className="w-3.5 h-3.5" />
                 <span>توقف موقت</span>
+              </button>
+
+              {/* Bulk SRT ZIP Download */}
+              <button
+                type="button"
+                onClick={handleDownloadFolderSRTZip}
+                disabled={isZippingSRT || projects.length === 0}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-amber-600 hover:bg-amber-500 disabled:opacity-50 shadow-md shadow-amber-600/30 transition-all cursor-pointer"
+                title="دانلود گروهی تمام زیرنویس‌های این پوشه با فرمت SubRip (.srt) در قالب فایل ZIP"
+              >
+                {isZippingSRT ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5" />}
+                <span>خروجی گروهی SRT (ZIP)</span>
               </button>
 
               {/* Bulk VTT ZIP Download */}
@@ -1368,11 +1498,28 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 type="button"
                 onClick={handleDownloadFolderVTTZip}
                 disabled={isZippingFolder || projects.length === 0}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 shadow-md shadow-emerald-600/30 transition-all"
-                title="دانلود تمام زیرنویس‌های این پوشه با فرمت WebVTT (.vtt) در قالب یک فایل ZIP"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 shadow-md shadow-emerald-600/30 transition-all cursor-pointer"
+                title="دانلود گروهی تمام زیرنویس‌های این پوشه با فرمت WebVTT (.vtt) در قالب فایل ZIP"
               >
                 {isZippingFolder ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5" />}
                 <span>خروجی گروهی VTT (ZIP)</span>
+              </button>
+
+              {/* Folder Global Find & Replace */}
+              <button
+                type="button"
+                onClick={() => {
+                  setBatchFindText('');
+                  setBatchReplaceText('');
+                  setReplaceResult(null);
+                  setIsFolderBatchReplaceOpen(true);
+                }}
+                disabled={projects.length === 0}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-indigo-200 bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/40 disabled:opacity-50 transition-all cursor-pointer"
+                title="جایگزینی سراسری کلمات و اصطلاحات در تمام زیرنویس‌های این پوشه"
+              >
+                <Replace className="w-3.5 h-3.5 text-indigo-400" />
+                <span>جایگزینی سراسری کلمات</span>
               </button>
 
               {/* Edit Folder Name */}
@@ -1381,10 +1528,11 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 onClick={() => {
                   setEditFolderName(selectedFolder.name);
                   setEditFolderDesc(selectedFolder.description || '');
+                  setEditFolderTone((selectedFolder.tone as ToneOption) || 'cinematic');
                   setIsEditFolderOpen(true);
                 }}
-                className="p-2 rounded-xl text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-800 border border-slate-700 transition-colors"
-                title="ویرایش نام و توضیحات پوشه"
+                className="p-2 rounded-xl text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-800 border border-slate-700 transition-colors cursor-pointer"
+                title="ویرایش نام، توضیحات و لحن پوشه"
               >
                 <Edit3 className="w-3.5 h-3.5" />
               </button>
@@ -1408,7 +1556,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
               </div>
 
               <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                <span>آپلود فایل‌های زیرنویس در پوشه</span>
+                <span>آپلود فایل‌های فیلم‌ها و زیرنویس‌ها در پوشه</span>
                 <span className="text-amber-400">«{selectedFolder.name}»</span>
               </h4>
 
@@ -1438,18 +1586,10 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
               </label>
 
               <div className="flex items-center gap-2 text-xs text-slate-300">
-                <span>لحن ترجمه:</span>
-                <select
-                  value={uploadTone}
-                  onChange={(e) => setUploadTone(e.target.value as ToneOption)}
-                  className="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white focus:outline-none focus:border-indigo-500"
-                >
-                  <option value="cinematic">سینمایی و دراماتیک (پیش‌فرض)</option>
-                  <option value="conversational">عامیانه و گفتاری</option>
-                  <option value="formal">رسمی و کتابی</option>
-                  <option value="epic">حماسی و تاریخی</option>
-                  <option value="humorous">طنز و شوخ‌طبعانه</option>
-                </select>
+                <span>لحن پیش‌فرض اعمال‌شده:</span>
+                <span className="font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-lg border border-amber-500/20">
+                  {TONE_OPTIONS.find((t) => t.id === (selectedFolder.tone || 'cinematic'))?.labelFa || selectedFolder.tone || 'سینمایی'}
+                </span>
               </div>
             </div>
 
@@ -1635,6 +1775,17 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                               </button>
                             )}
 
+                            {/* Single SRT Export */}
+                            <a
+                              href={`/api/projects/${proj.id}/export/srt`}
+                              download
+                              className="p-1.5 text-amber-400 hover:text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/20 rounded-lg transition-colors flex items-center gap-1 text-[11px] font-semibold"
+                              title="دانلود فایل SubRip (.srt)"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span>SRT</span>
+                            </a>
+
                             {/* Single VTT Export */}
                             <a
                               href={`/api/projects/${proj.id}/export/vtt`}
@@ -1817,6 +1968,17 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                             </span>
                           )}
 
+                          {/* Single SRT */}
+                          <a
+                            href={`/api/projects/${proj.id}/export/srt`}
+                            download
+                            className="p-1.5 text-amber-400 hover:text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/20 rounded-lg transition-colors flex items-center gap-1 text-[11px] font-semibold"
+                            title="دانلود فایل SRT"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            <span>SRT</span>
+                          </a>
+
                           {/* Single VTT */}
                           <a
                             href={`/api/projects/${proj.id}/export/vtt`}
@@ -1996,6 +2158,27 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 />
               </div>
 
+              {/* TONE SELECTION FOR THIS FOLDER */}
+              <div>
+                <label className="text-xs text-slate-300 font-semibold block mb-1">
+                  لحن ترجمه اختصاصی برای این پوشه:
+                </label>
+                <select
+                  value={newFolderTone}
+                  onChange={(e) => setNewFolderTone(e.target.value as ToneOption)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-amber-300 font-semibold focus:outline-none focus:border-indigo-500 cursor-pointer"
+                >
+                  {TONE_OPTIONS.map((t) => (
+                    <option key={t.id} value={t.id} className="bg-slate-900 text-slate-100">
+                      {t.labelFa} - {t.descriptionFa}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  تمام زیرنویس‌هایی که در این پوشه آپلود می‌شوند به صورت یکدست با این لحن ترجمه خواهند شد.
+                </p>
+              </div>
+
               <div className="flex items-center justify-end gap-2 mt-2">
                 <button
                   type="button"
@@ -2047,6 +2230,27 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 />
               </div>
 
+              {/* TONE SELECTION FOR THIS FOLDER */}
+              <div>
+                <label className="text-xs text-slate-300 font-semibold block mb-1">
+                  لحن ترجمه اختصاصی برای این پوشه:
+                </label>
+                <select
+                  value={editFolderTone}
+                  onChange={(e) => setEditFolderTone(e.target.value as ToneOption)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-amber-300 font-semibold focus:outline-none focus:border-indigo-500 cursor-pointer"
+                >
+                  {TONE_OPTIONS.map((t) => (
+                    <option key={t.id} value={t.id} className="bg-slate-900 text-slate-100">
+                      {t.labelFa} - {t.descriptionFa}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  تغییر لحن فوراً بر روی تمامی فایل‌های موجود در این پوشه اعمال می‌شود.
+                </p>
+              </div>
+
               <div className="flex items-center justify-end gap-2 mt-2">
                 <button
                   type="button"
@@ -2060,6 +2264,153 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                   className="px-4 py-1.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md transition-colors"
                 >
                   ذخیره تغییرات
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Global Batch Find & Replace in Folder */}
+      {isFolderBatchReplaceOpen && selectedFolder && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 lg:p-6 w-full max-w-xl shadow-2xl flex flex-col gap-4 animate-scale-up max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Replace className="w-4 h-4 text-indigo-400" />
+                <span>جایگزینی سراسری کلمات در پوشه «{selectedFolder.name}»</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIsFolderBatchReplaceOpen(false)}
+                className="text-slate-400 hover:text-white text-xs cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed bg-indigo-950/40 border border-indigo-500/20 rounded-xl p-3">
+              این ابزار تمام فایل‌های زیرنویس موجود در پوشه <span className="text-amber-400 font-bold">«{selectedFolder.name}»</span> ({projects.length} فایل) را پیمایش کرده و کلمه یا عبارت مورد نظر شما را به طور یکپارچه در دیتابیس سرور جایگزین می‌نماید.
+            </p>
+
+            <form onSubmit={handleExecuteFolderBatchReplace} className="flex flex-col gap-4">
+              <div>
+                <label className="text-xs text-slate-300 font-semibold block mb-1">
+                  کلمه یا عبارت جستجو:
+                </label>
+                <input
+                  type="text"
+                  value={batchFindText}
+                  onChange={(e) => setBatchFindText(e.target.value)}
+                  placeholder="مثال: موجودات فضایی"
+                  required
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                  autoFocus
+                />
+              </div>
+
+              <div>
+                <label className="text-xs text-slate-300 font-semibold block mb-1">
+                  جایگزین شود با:
+                </label>
+                <input
+                  type="text"
+                  value={batchReplaceText}
+                  onChange={(e) => setBatchReplaceText(e.target.value)}
+                  placeholder="مثال: هوشمندان فرازمینی (ET)"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+
+              {/* Scope & Options */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-950/60 p-3 rounded-xl border border-slate-800">
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs text-slate-400 font-semibold">محدوده جایگزینی:</label>
+                  <select
+                    value={batchScope}
+                    onChange={(e) => setBatchScope(e.target.value as 'translated' | 'both')}
+                    className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500"
+                  >
+                    <option value="translated">فقط در متن‌های ترجمه شده (فارسی)</option>
+                    <option value="both">در هر دو (ترجمه شده + متن اصلی)</option>
+                  </select>
+                </div>
+
+                <div className="flex flex-col gap-2 justify-center pt-2 sm:pt-0">
+                  <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={batchMatchCase}
+                      onChange={(e) => setBatchMatchCase(e.target.checked)}
+                      className="rounded text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5 accent-indigo-600"
+                    />
+                    <span>تطابق بزرگ/کوچکی حروف (Match Case)</span>
+                  </label>
+
+                  <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={batchWholeWord}
+                      onChange={(e) => setBatchWholeWord(e.target.checked)}
+                      className="rounded text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5 accent-indigo-600"
+                    />
+                    <span>فقط کلمات کامل (Whole Word)</span>
+                  </label>
+
+                  <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={batchUseRegex}
+                      onChange={(e) => setBatchUseRegex(e.target.checked)}
+                      className="rounded text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5 accent-indigo-600"
+                    />
+                    <span>عبارت منظم (Regex)</span>
+                  </label>
+                </div>
+              </div>
+
+              {/* Execution Result Banner */}
+              {replaceResult && (
+                <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-3 text-xs text-emerald-300 flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                  <div className="flex flex-col gap-1">
+                    <span className="font-bold">عملیات با موفقیت انجام شد:</span>
+                    <span>
+                      تعداد <strong className="text-white">{replaceResult.totalOccurrences}</strong> مورد در <strong className="text-white">{replaceResult.affectedProjectsCount}</strong> فایل جایگزین و ذخیره شد.
+                    </span>
+                    {replaceResult.affectedProjects?.length > 0 && (
+                      <span className="text-[11px] text-emerald-400/80">
+                        فایل‌های تغییر یافته: {replaceResult.affectedProjects.slice(0, 5).join('، ')}{replaceResult.affectedProjects.length > 5 ? ' و...' : ''}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setIsFolderBatchReplaceOpen(false)}
+                  className="px-3.5 py-1.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white cursor-pointer"
+                >
+                  بستن
+                </button>
+                <button
+                  type="submit"
+                  disabled={isExecutingReplace || !batchFindText.trim()}
+                  className="px-4 py-1.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 shadow-md transition-colors flex items-center gap-1.5 cursor-pointer"
+                >
+                  {isExecutingReplace ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>در حال جایگزینی در تمام فایل‌های پوشه...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Replace className="w-3.5 h-3.5" />
+                      <span>اجرای جایگزینی سراسری</span>
+                    </>
+                  )}
                 </button>
               </div>
             </form>

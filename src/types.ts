@@ -126,7 +126,12 @@ export type ToneOption =
   | 'formal' 
   | 'humorous' 
   | 'educational' 
+  | 'documentary'
   | 'epic' 
+  | 'action'
+  | 'horror'
+  | 'poetic'
+  | 'animation'
   | 'custom';
 
 export interface ToneInfo {

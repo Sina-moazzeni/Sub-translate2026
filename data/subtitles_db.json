@@ -6,7 +6,8 @@
       "name": "افشای کیهانی فصل اول",
       "description": "پوشه پیش‌فرض زیرنویس‌های مستند افشای کیهانی (Cosmic Disclosure Season 1)",
       "createdAt": "2026-11-01T11:04:46.017Z",
-      "updatedAt": "2026-11-01T11:04:46.017Z"
+      "updatedAt": "2026-11-02T13:14:57.350Z",
+      "tone": "documentary"
     }
   ],
   "projects": [
@@ -17,7 +18,7 @@
       "format": "srt",
       "sourceLanguage": "auto",
       "targetLanguage": "fa",
-      "tone": "cinematic",
+      "tone": "documentary",
       "status": "idle",
       "totalCues": 3,
       "translatedCues": 0,

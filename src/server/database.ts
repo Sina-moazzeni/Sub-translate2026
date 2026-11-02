@@ -6,6 +6,7 @@ export interface ServerFolder {
   id: string;
   name: string;
   description?: string;
+  tone?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -195,12 +196,13 @@ export function getFolderById(id: string): ServerFolder | undefined {
   return db.folders.find((f) => f.id === id);
 }
 
-export function createFolder(name: string, description?: string): ServerFolder {
+export function createFolder(name: string, description?: string, tone?: string): ServerFolder {
   const db = getDatabase();
   const folder: ServerFolder = {
     id: 'folder_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6),
     name: name.trim(),
     description: description?.trim(),
+    tone: tone?.trim() || 'cinematic',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -209,12 +211,21 @@ export function createFolder(name: string, description?: string): ServerFolder {
   return folder;
 }
 
-export function updateFolder(id: string, updates: Partial<Pick<ServerFolder, 'name' | 'description'>>): ServerFolder | null {
+export function updateFolder(id: string, updates: Partial<Pick<ServerFolder, 'name' | 'description' | 'tone'>>): ServerFolder | null {
   const db = getDatabase();
   const folder = db.folders.find((f) => f.id === id);
   if (!folder) return null;
   if (updates.name) folder.name = updates.name.trim();
   if (updates.description !== undefined) folder.description = updates.description.trim();
+  if (updates.tone !== undefined) {
+    folder.tone = updates.tone.trim();
+    // Also propagate to all projects currently in this folder
+    db.projects.forEach((p) => {
+      if (p.folderId === id) {
+        p.tone = folder.tone || 'cinematic';
+      }
+    });
+  }
   folder.updatedAt = new Date().toISOString();
   saveDatabaseSync();
   return folder;
@@ -231,6 +242,104 @@ export function deleteFolder(id: string): boolean {
     return true;
   }
   return false;
+}
+
+export function batchReplaceInFolder(
+  folderId: string,
+  options: {
+    findText: string;
+    replaceText: string;
+    scope?: 'translated' | 'both';
+    matchCase?: boolean;
+    wholeWord?: boolean;
+    useRegex?: boolean;
+  }
+): {
+  totalReplacements: number;
+  affectedFilesCount: number;
+  fileDetails: Array<{ fileId: string; fileName: string; count: number }>;
+} {
+  const db = getDatabase();
+  const projects = db.projects.filter((p) => p.folderId === folderId);
+  const { findText, replaceText, scope = 'translated', matchCase = false, wholeWord = false, useRegex = false } = options;
+
+  let pattern: RegExp;
+  try {
+    if (useRegex) {
+      pattern = new RegExp(findText, matchCase ? 'g' : 'gi');
+    } else {
+      let escaped = findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (wholeWord) {
+        escaped = `\\b${escaped}\\b`;
+      }
+      pattern = new RegExp(escaped, matchCase ? 'g' : 'gi');
+    }
+  } catch {
+    return { totalReplacements: 0, affectedFilesCount: 0, fileDetails: [] };
+  }
+
+  let totalReplacements = 0;
+  const fileDetails: Array<{ fileId: string; fileName: string; count: number }> = [];
+
+  for (const project of projects) {
+    let projectCount = 0;
+    project.items = project.items.map((item) => {
+      let modified = false;
+      let newTranslated = item.translatedText;
+      let newOriginal = item.originalText;
+
+      if (scope === 'translated' || scope === 'both') {
+        if (newTranslated) {
+          const matches = newTranslated.match(pattern);
+          if (matches) {
+            projectCount += matches.length;
+            newTranslated = newTranslated.replace(pattern, replaceText);
+            modified = true;
+          }
+        }
+      }
+
+      if (scope === 'both') {
+        if (newOriginal) {
+          const matches = newOriginal.match(pattern);
+          if (matches) {
+            projectCount += matches.length;
+            newOriginal = newOriginal.replace(pattern, replaceText);
+            modified = true;
+          }
+        }
+      }
+
+      if (modified) {
+        return {
+          ...item,
+          translatedText: newTranslated,
+          originalText: newOriginal,
+        };
+      }
+      return item;
+    });
+
+    if (projectCount > 0) {
+      project.updatedAt = new Date().toISOString();
+      totalReplacements += projectCount;
+      fileDetails.push({
+        fileId: project.id,
+        fileName: project.name,
+        count: projectCount,
+      });
+    }
+  }
+
+  if (totalReplacements > 0) {
+    saveDatabaseSync();
+  }
+
+  return {
+    totalReplacements,
+    affectedFilesCount: fileDetails.length,
+    fileDetails,
+  };
 }
 
 // ─── Project Operations ───────────────────────────────────────────────────────
