@@ -46,6 +46,9 @@ import {
   getDatabaseFilePath,
   getKeyExhaustionStatus,
   batchReplaceInFolder,
+  resetKeyCooldown,
+  resetAllKeyCooldowns,
+  resetKeyStats,
   ServerSubtitleProject
 } from './src/server/database';
 import {
@@ -58,7 +61,8 @@ import {
   pauseSingleProject,
   resumeSingleProject,
   restartProject,
-  testServerKey
+  testServerKey,
+  resetWorkerExhaustionBackoff
 } from './src/server/backgroundWorker';
 
 dotenv.config();
@@ -2712,6 +2716,7 @@ app.post('/api/server/keys', (req, res) => {
       return res.status(400).json({ success: false, error: 'Keys array required' });
     }
     const updatedKeys = mode === 'replace' ? setServerKeys(keys) : addServerKeys(keys);
+    resetWorkerExhaustionBackoff();
     return res.json({
       success: true,
       count: updatedKeys.length,
@@ -2731,6 +2736,7 @@ app.put('/api/server/keys/:index', (req, res) => {
       return res.status(400).json({ success: false, error: 'کلید معتبر الزامی است.' });
     }
     const updatedKeys = updateSingleServerKey(index, key.trim());
+    resetWorkerExhaustionBackoff();
     return res.json({
       success: true,
       count: updatedKeys.length,
@@ -2788,6 +2794,55 @@ app.get('/api/server/keys/status', (req, res) => {
   try {
     const keyStatuses = getKeyExhaustionStatus();
     return res.json({ success: true, keys: keyStatuses });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 20b. Reset all key cooldowns (instantly reactivate all keys)
+app.post('/api/server/keys/reset-cooldowns', (req, res) => {
+  try {
+    resetAllKeyCooldowns();
+    resetWorkerExhaustionBackoff();
+    return res.json({
+      success: true,
+      message: 'تمام کلیدها از وضعیت وقفه خارج شده و مجدداً فعال شدند.',
+      details: getServerKeysWithDetails(),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 20c. Reset single key cooldown by index
+app.post('/api/server/keys/:index/reset-cooldown', (req, res) => {
+  try {
+    const index = parseInt(req.params.index, 10);
+    const allKeys = getServerKeys();
+    if (index >= 0 && index < allKeys.length) {
+      resetKeyCooldown(allKeys[index]);
+      resetWorkerExhaustionBackoff();
+      return res.json({
+        success: true,
+        message: `وقفه کلید #${index + 1} بازنشانی شد و کلید فعال گردید.`,
+        details: getServerKeysWithDetails(),
+      });
+    }
+    return res.status(404).json({ success: false, error: 'کلید یافت نشد.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 20d. Reset all key token stats
+app.delete('/api/server/keys/stats', (req, res) => {
+  try {
+    resetKeyStats();
+    return res.json({
+      success: true,
+      message: 'آمار مصرف توکن کلیدها با موفقیت صفر شد.',
+      details: getServerKeysWithDetails(),
+    });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
   }

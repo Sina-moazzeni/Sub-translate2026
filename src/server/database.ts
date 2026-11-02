@@ -49,6 +49,15 @@ export interface ServerConfig {
   maxConcurrentProjects: number; // default 2
 }
 
+export interface KeyUsageRecord {
+  requestsCount: number;
+  promptTokens: number;
+  candidatesTokens: number;
+  totalTokens: number;
+  lastUsedAt?: string;
+  lastError?: string;
+}
+
 export interface SubtitlesDatabase {
   version: number;
   folders: ServerFolder[];
@@ -56,14 +65,15 @@ export interface SubtitlesDatabase {
   serverKeys: string[];
   activeKeyIndex: number;
   serverConfig?: ServerConfig;
+  keyStats?: Record<string, KeyUsageRecord>;
   stats: {
     totalTranslations: number;
     totalTokensUsed: number;
   };
 }
 
-const DATA_DIR = path.join(process.cwd(), 'data');
-const DB_FILE = path.join(DATA_DIR, 'subtitles_db.json');
+const DATA_DIR = process.env.DATA_DIR?.trim() || process.env.SUBTITLES_DB_DIR?.trim() || path.join(process.cwd(), 'data');
+const DB_FILE = process.env.SUBTITLES_DB_PATH?.trim() || path.join(DATA_DIR, 'subtitles_db.json');
 const DB_TMP_FILE = path.join(DATA_DIR, 'subtitles_db.json.tmp');
 
 let inMemoryDb: SubtitlesDatabase | null = null;
@@ -514,27 +524,44 @@ export function deleteSingleServerKey(index: number): string[] {
   return getServerKeys();
 }
 
-export function getServerKeysWithDetails(): Array<{
+export interface ServerKeyDetail {
   index: number;
   rawKey: string;
   maskedKey: string;
   isExhausted: boolean;
   cooldownRemainingSec: number;
-}> {
+  requestsCount: number;
+  promptTokens: number;
+  candidatesTokens: number;
+  totalTokens: number;
+  lastUsedAt?: string;
+}
+
+export function getServerKeysWithDetails(): ServerKeyDetail[] {
   const allKeys = getServerKeys();
+  const db = getDatabase();
+  const keyStats = db.keyStats || {};
   const now = Date.now();
+
   return allKeys.map((k, index) => {
     const entry = exhaustedKeysMap.get(k);
     const isExhausted = entry ? (now - entry.timestamp <= KEY_EXHAUSTION_COOLDOWN_MS) : false;
     const cooldownRemainingSec = entry && isExhausted ? Math.max(0, Math.ceil((KEY_EXHAUSTION_COOLDOWN_MS - (now - entry.timestamp)) / 1000)) : 0;
     const len = k.length;
     const maskedKey = len > 8 ? k.substring(0, 4) + '...' + k.substring(len - 4) : '****';
+    const stats = keyStats[k] || { requestsCount: 0, promptTokens: 0, candidatesTokens: 0, totalTokens: 0 };
+
     return {
       index,
       rawKey: k,
       maskedKey,
       isExhausted,
       cooldownRemainingSec,
+      requestsCount: stats.requestsCount || 0,
+      promptTokens: stats.promptTokens || 0,
+      candidatesTokens: stats.candidatesTokens || 0,
+      totalTokens: stats.totalTokens || 0,
+      lastUsedAt: stats.lastUsedAt,
     };
   });
 }
@@ -556,11 +583,12 @@ export function rotateActiveKeyIndex(): number {
 // ─── Key Exhaustion & Cooldown Tracking ──────────────────────────────────────
 
 const exhaustedKeysMap = new Map<string, { timestamp: number; reason: string }>();
-const KEY_EXHAUSTION_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes cooldown when token/quota depleted
+// 60 seconds RPM cooldown (Gemini 15 RPM limit resets every minute, NOT 15 minutes!)
+const KEY_EXHAUSTION_COOLDOWN_MS = 60 * 1000;
 
 export function markKeyAsExhausted(key: string, reason: string = 'Quota exhausted (429)'): void {
   exhaustedKeysMap.set(key, { timestamp: Date.now(), reason });
-  console.log(`[KeyPool] Key marked as EXHAUSTED: ${key.slice(0, 6)}... (${reason}). Will not be queried until rotation cycle resets.`);
+  console.log(`[KeyPool] Key paused in cooldown: ${key.slice(0, 6)}... (${reason}). Cooldown: 60s.`);
 }
 
 export function isKeyExhausted(key: string): boolean {
@@ -571,6 +599,46 @@ export function isKeyExhausted(key: string): boolean {
     return false;
   }
   return true;
+}
+
+export function resetKeyCooldown(key: string): void {
+  exhaustedKeysMap.delete(key);
+}
+
+export function resetAllKeyCooldowns(): void {
+  exhaustedKeysMap.clear();
+  console.log('[KeyPool] All key cooldowns have been manually reset.');
+}
+
+export function recordKeyUsage(
+  key: string,
+  tokens: { prompt: number; candidates: number; total: number }
+): void {
+  const db = getDatabase();
+  if (!db.keyStats) {
+    db.keyStats = {};
+  }
+  if (!db.keyStats[key]) {
+    db.keyStats[key] = { requestsCount: 0, promptTokens: 0, candidatesTokens: 0, totalTokens: 0 };
+  }
+  const rec = db.keyStats[key];
+  rec.requestsCount += 1;
+  rec.promptTokens += (tokens.prompt || 0);
+  rec.candidatesTokens += (tokens.candidates || 0);
+  rec.totalTokens += (tokens.total || 0);
+  rec.lastUsedAt = new Date().toISOString();
+
+  if (!db.stats) {
+    db.stats = { totalTranslations: 0, totalTokensUsed: 0 };
+  }
+  db.stats.totalTokensUsed += (tokens.total || 0);
+  scheduleSaveDatabase();
+}
+
+export function resetKeyStats(): void {
+  const db = getDatabase();
+  db.keyStats = {};
+  saveDatabaseSync();
 }
 
 /**

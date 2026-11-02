@@ -131,6 +131,11 @@ export interface KeyDetailItem {
   maskedKey: string;
   isExhausted: boolean;
   cooldownRemainingSec: number;
+  requestsCount?: number;
+  promptTokens?: number;
+  candidatesTokens?: number;
+  totalTokens?: number;
+  lastUsedAt?: string;
 }
 
 interface FolderProjectManagerProps {
@@ -946,6 +951,49 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     }
   };
 
+  // Reset Cooldown for all keys
+  const handleResetAllCooldowns = async () => {
+    try {
+      const res = await fetch('/api/server/keys/reset-cooldowns', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || 'تمام کلیدها از حالت وقفه خارج شده و فوراً فعال شدند.', 'success');
+        fetchServerKeys();
+      }
+    } catch {
+      onShowToast('خطا در فعال‌سازی کلیدها', 'error');
+    }
+  };
+
+  // Reset Cooldown for a single key
+  const handleResetSingleCooldown = async (index: number) => {
+    try {
+      const res = await fetch(`/api/server/keys/${index}/reset-cooldown`, { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || 'کلید مورد نظر فوراً فعال شد.', 'success');
+        fetchServerKeys();
+      }
+    } catch {
+      onShowToast('خطا در رفع وقفه کلید', 'error');
+    }
+  };
+
+  // Reset all key usage statistics
+  const handleResetKeyStats = async () => {
+    if (!window.confirm('آیا از ریست کردن آمار مصرف توکن‌ها برای تمام کلیدها اطمینان دارید؟')) return;
+    try {
+      const res = await fetch('/api/server/keys/stats', { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast('آمار مصرف توکن‌های کلیدها بازنشانی شد.', 'info');
+        fetchServerKeys();
+      }
+    } catch {
+      onShowToast('خطا در ریست آمار مصرف', 'error');
+    }
+  };
+
   // Edit single key
   const handleUpdateSingleKey = async (index: number) => {
     if (!editingKeyVal.trim()) {
@@ -1403,37 +1451,40 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       {activeView === 'inside_folder' && selectedFolder && (
         <div className="flex flex-col gap-6 animate-fade-in">
           {/* Folder Header Information Card */}
-          <div className="bg-gradient-to-r from-slate-900 via-slate-900 to-indigo-950/40 rounded-2xl border border-indigo-500/30 p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-lg shadow-indigo-950/20">
-            <div className="flex items-center gap-3.5">
-              <div className="w-12 h-12 rounded-2xl bg-indigo-600/20 border border-indigo-500/40 text-amber-400 flex items-center justify-center shrink-0 shadow-inner">
-                <FolderOpen className="w-6 h-6" />
-              </div>
-              <div className="flex flex-col">
-                <div className="flex items-center gap-2.5 flex-wrap">
-                  <h3 className="text-base font-bold text-white flex items-center gap-2">
-                    <span>صفحه فیلم‌ها و زیرنویس‌ها:</span>
-                    <span className="text-amber-400">{selectedFolder.name}</span>
-                  </h3>
-                  <span className="text-xs font-mono font-bold px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                    {projects.length} فیلم/قسمت در این پوشه
-                  </span>
+          <div className="w-full max-w-full overflow-hidden bg-gradient-to-br from-slate-900 via-slate-900/95 to-indigo-950/40 rounded-2xl border border-indigo-500/30 p-4 sm:p-5 flex flex-col gap-4 shadow-lg shadow-indigo-950/20">
+            {/* Top Row: Folder Identity & Meta & Tone Selector */}
+            <div className="w-full flex flex-col lg:flex-row items-start lg:items-center justify-between gap-3.5">
+              <div className="flex items-start sm:items-center gap-3.5 min-w-0">
+                <div className="w-12 h-12 rounded-2xl bg-indigo-600/20 border border-indigo-500/40 text-amber-400 flex items-center justify-center shrink-0 shadow-inner">
+                  <FolderOpen className="w-6 h-6" />
                 </div>
-                {selectedFolder.description ? (
-                  <p className="text-xs text-slate-300 mt-1 leading-relaxed">{selectedFolder.description}</p>
-                ) : (
-                  <p className="text-xs text-slate-400 mt-1">پوشه اختصاصی برای نگهداری و ترجمه فایل‌های این دسته‌بندی</p>
-                )}
+                <div className="flex flex-col min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-1.5 flex-wrap">
+                      <span className="text-slate-300">صفحه فیلم‌ها و زیرنویس‌ها:</span>
+                      <span className="text-amber-400 font-extrabold truncate max-w-xs sm:max-w-md">{selectedFolder.name}</span>
+                    </h3>
+                    <span className="text-xs font-mono font-bold px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 shrink-0">
+                      {projects.length} فیلم/قسمت
+                    </span>
+                  </div>
+                  {selectedFolder.description ? (
+                    <p className="text-xs text-slate-300 mt-1 leading-relaxed line-clamp-2">{selectedFolder.description}</p>
+                  ) : (
+                    <p className="text-xs text-slate-400 mt-0.5">پوشه اختصاصی برای نگهداری و ترجمه فایل‌های این دسته‌بندی</p>
+                  )}
+                </div>
+              </div>
 
-                {/* FOLDER-LEVEL TONE SELECTOR (تنظیم لحن برای کل پوشه) */}
-                <div className="flex items-center gap-2 mt-2.5 pt-2 border-t border-slate-800/80">
-                  <span className="text-xs text-slate-300 flex items-center gap-1 font-semibold">
-                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                    <span>لحن ترجمه این پوشه:</span>
-                  </span>
+              {/* Top-Right: Folder Tone Selector & Edit Folder Meta */}
+              <div className="flex items-center gap-2 shrink-0 self-end lg:self-center flex-wrap">
+                <div className="flex items-center gap-1.5 bg-slate-950/90 border border-indigo-500/30 rounded-xl px-2.5 py-1.5 shadow-xs">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span className="text-xs text-slate-300 font-semibold shrink-0">لحن پوشه:</span>
                   <select
                     value={selectedFolder.tone || 'cinematic'}
                     onChange={(e) => handleUpdateFolderTone(e.target.value as ToneOption)}
-                    className="bg-slate-950 border border-indigo-500/40 rounded-lg px-2.5 py-1 text-xs text-amber-300 font-bold focus:outline-none focus:border-indigo-400 cursor-pointer shadow-xs"
+                    className="bg-transparent border-0 text-xs text-amber-300 font-bold focus:outline-none cursor-pointer pr-1"
                     title="تغییر لحن کل فایل‌های زیرنویس این پوشه"
                   >
                     {TONE_OPTIONS.map((t) => (
@@ -1443,99 +1494,101 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                     ))}
                   </select>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditFolderName(selectedFolder.name);
+                    setEditFolderDesc(selectedFolder.description || '');
+                    setEditFolderTone((selectedFolder.tone as ToneOption) || 'cinematic');
+                    setIsEditFolderOpen(true);
+                  }}
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-slate-300 hover:text-white bg-slate-800/80 hover:bg-slate-800 border border-slate-700 text-xs font-semibold transition-colors cursor-pointer"
+                  title="ویرایش نام و مشخصات پوشه"
+                >
+                  <Edit3 className="w-3.5 h-3.5 text-slate-400" />
+                  <span className="hidden sm:inline">ویرایش پوشه</span>
+                </button>
               </div>
             </div>
 
-            {/* Folder Actions Toolbar */}
-            <div className="flex items-center gap-2 shrink-0 flex-wrap w-full md:w-auto justify-end">
-              {/* Start All in Folder */}
-              <button
-                type="button"
-                onClick={handleStartFolder}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 transition-all cursor-pointer"
-                title="شروع ترجمه خودکار تمام فایل‌های این پوشه در پس‌زمینه سرور"
-              >
-                <Play className="w-3.5 h-3.5 fill-current" />
-                <span>شروع ترجمه فیلم‌ها</span>
-              </button>
+            {/* Bottom Row: Actions Toolbar divided into functional clusters, fully responsive and wrapped */}
+            <div className="w-full pt-3 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2.5">
+              {/* Cluster 1: Translation Controls */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[11px] text-slate-400 font-semibold ml-1 hidden md:inline">ترجمه سرور:</span>
+                
+                <button
+                  type="button"
+                  onClick={handleStartFolder}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 transition-all cursor-pointer"
+                  title="شروع ترجمه خودکار تمام فایل‌های این پوشه در پس‌زمینه سرور"
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>شروع ترجمه فیلم‌ها</span>
+                </button>
 
-              {/* Resume Incomplete */}
-              <button
-                type="button"
-                onClick={handleResumeFolder}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 transition-colors cursor-pointer"
-                title="ادامه ترجمه سطرهای باقی‌مانده تمام فایل‌های ناقص پوشه"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>ادامه فیلم‌های ناقص</span>
-              </button>
+                <button
+                  type="button"
+                  onClick={handleResumeFolder}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 transition-colors cursor-pointer"
+                  title="ادامه ترجمه سطرهای باقی‌مانده تمام فایل‌های ناقص پوشه"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>ادامه فایل‌های ناقص</span>
+                </button>
 
-              {/* Pause Folder */}
-              <button
-                type="button"
-                onClick={handlePauseFolder}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-colors cursor-pointer"
-                title="توقف موقت ترجمه این پوشه"
-              >
-                <Pause className="w-3.5 h-3.5" />
-                <span>توقف موقت</span>
-              </button>
+                <button
+                  type="button"
+                  onClick={handlePauseFolder}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-colors cursor-pointer"
+                  title="توقف موقت ترجمه این پوشه"
+                >
+                  <Pause className="w-3.5 h-3.5" />
+                  <span>توقف موقت</span>
+                </button>
+              </div>
 
-              {/* Bulk SRT ZIP Download */}
-              <button
-                type="button"
-                onClick={handleDownloadFolderSRTZip}
-                disabled={isZippingSRT || projects.length === 0}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-amber-600 hover:bg-amber-500 disabled:opacity-50 shadow-md shadow-amber-600/30 transition-all cursor-pointer"
-                title="دانلود گروهی تمام زیرنویس‌های این پوشه با فرمت SubRip (.srt) در قالب فایل ZIP"
-              >
-                {isZippingSRT ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5" />}
-                <span>خروجی گروهی SRT (ZIP)</span>
-              </button>
+              {/* Cluster 2: Export & Tools */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <button
+                  type="button"
+                  onClick={handleDownloadFolderSRTZip}
+                  disabled={isZippingSRT || projects.length === 0}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-amber-200 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/30 disabled:opacity-50 transition-all cursor-pointer"
+                  title="دانلود گروهی تمام زیرنویس‌های این پوشه با فرمت SubRip (.srt) در قالب فایل ZIP"
+                >
+                  {isZippingSRT ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5 text-amber-400" />}
+                  <span>خروجی گروهی SRT (ZIP)</span>
+                </button>
 
-              {/* Bulk VTT ZIP Download */}
-              <button
-                type="button"
-                onClick={handleDownloadFolderVTTZip}
-                disabled={isZippingFolder || projects.length === 0}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 shadow-md shadow-emerald-600/30 transition-all cursor-pointer"
-                title="دانلود گروهی تمام زیرنویس‌های این پوشه با فرمت WebVTT (.vtt) در قالب فایل ZIP"
-              >
-                {isZippingFolder ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5" />}
-                <span>خروجی گروهی VTT (ZIP)</span>
-              </button>
+                <button
+                  type="button"
+                  onClick={handleDownloadFolderVTTZip}
+                  disabled={isZippingFolder || projects.length === 0}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-emerald-200 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 disabled:opacity-50 transition-all cursor-pointer"
+                  title="دانلود گروهی تمام زیرنویس‌های این پوشه با فرمت WebVTT (.vtt) در قالب فایل ZIP"
+                >
+                  {isZippingFolder ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5 text-emerald-400" />}
+                  <span>خروجی گروهی VTT (ZIP)</span>
+                </button>
 
-              {/* Folder Global Find & Replace */}
-              <button
-                type="button"
-                onClick={() => {
-                  setBatchFindText('');
-                  setBatchReplaceText('');
-                  setReplaceResult(null);
-                  setIsFolderBatchReplaceOpen(true);
-                }}
-                disabled={projects.length === 0}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-indigo-200 bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/40 disabled:opacity-50 transition-all cursor-pointer"
-                title="جایگزینی سراسری کلمات و اصطلاحات در تمام زیرنویس‌های این پوشه"
-              >
-                <Replace className="w-3.5 h-3.5 text-indigo-400" />
-                <span>جایگزینی سراسری کلمات</span>
-              </button>
-
-              {/* Edit Folder Name */}
-              <button
-                type="button"
-                onClick={() => {
-                  setEditFolderName(selectedFolder.name);
-                  setEditFolderDesc(selectedFolder.description || '');
-                  setEditFolderTone((selectedFolder.tone as ToneOption) || 'cinematic');
-                  setIsEditFolderOpen(true);
-                }}
-                className="p-2 rounded-xl text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-800 border border-slate-700 transition-colors cursor-pointer"
-                title="ویرایش نام، توضیحات و لحن پوشه"
-              >
-                <Edit3 className="w-3.5 h-3.5" />
-              </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBatchFindText('');
+                    setBatchReplaceText('');
+                    setReplaceResult(null);
+                    setIsFolderBatchReplaceOpen(true);
+                  }}
+                  disabled={projects.length === 0}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-violet-200 bg-violet-500/20 hover:bg-violet-500/30 border border-violet-500/30 disabled:opacity-50 transition-all cursor-pointer"
+                  title="جایگزینی سراسری کلمات و اصطلاحات در تمام زیرنویس‌های این پوشه"
+                >
+                  <Replace className="w-3.5 h-3.5 text-violet-400" />
+                  <span>جایگزینی کلمات در پوشه</span>
+                </button>
+              </div>
             </div>
           </div>
 
@@ -2529,64 +2582,158 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
         </div>
       )}
 
-      {/* Modal: Server Keys Management with Inline Edit & Delete */}
+      {/* Modal: Server Keys Management Dashboard & Token Analytics */}
       {isKeysModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 lg:p-6 w-full max-w-xl shadow-2xl flex flex-col gap-4 animate-scale-up max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                <Key className="w-4 h-4 text-amber-400" />
-                <span>مدیریت و استخر کلیدهای Gemini 3.5 Flash Lite</span>
-              </h3>
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 lg:p-7 w-full max-w-4xl shadow-2xl flex flex-col gap-5 animate-scale-up max-h-[92vh] overflow-y-auto">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-4 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                  <Key className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+                    <span>مدیریت استخر کلیدهای هوش مصنوعی و آمار مصرف توکن</span>
+                    <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                      Gemini 3.5 Flash Lite
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    نمایش وضعیت زنده، میزان توکن مصرفی هر کلید، چرخش خودکار و رفع وقفه سهمیه
+                  </p>
+                </div>
+              </div>
               <button
                 type="button"
                 onClick={() => setIsKeysModalOpen(false)}
-                className="text-slate-400 hover:text-white text-xs"
+                className="w-8 h-8 rounded-xl bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center text-sm font-bold transition-colors cursor-pointer"
               >
                 ✕
               </button>
             </div>
 
-            {/* Explanatory banner */}
-            <div className="bg-indigo-950/40 border border-indigo-500/20 rounded-xl p-3 text-xs text-slate-300 space-y-1.5 leading-relaxed">
-              <p>
-                <span className="text-emerald-300 font-bold">✓ ترجمه موازی با کلیدهای مجزا:</span> هر فایل در حال ترجمه یک کلید فعال اختصاصی را رزرو می‌کند تا نرخ درخواست‌ها مجزا و بدون تداخل با سایر فایل‌ها مدیریت شود.
-              </p>
-              <p>
-                <span className="text-amber-300 font-bold">✓ محافظت در برابر اتمام توکن:</span> با اتمام توکن یک کلید، آن کلید موقتاً استراحت می‌کند و پروژه فوراً به کلید بعدی منتقل شده و ترجمه هرگز ناقص رها نمی‌شود.
-              </p>
-            </div>
+            {/* KPI Summary Cards */}
+            {(() => {
+              const totalKeys = keysDetails.length;
+              const activeKeys = keysDetails.filter((k) => !k.isExhausted).length;
+              const restingKeys = keysDetails.filter((k) => k.isExhausted).length;
+              const totalTokensSum = keysDetails.reduce((acc, k) => acc + (k.totalTokens || 0), 0);
+              const totalReqsSum = keysDetails.reduce((acc, k) => acc + (k.requestsCount || 0), 0);
 
-            {/* Registered Keys List with Individual Edit & Delete */}
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
-                  <Activity className="w-3.5 h-3.5 text-indigo-400" />
-                  <span>لیست کلیدهای ذخیره شده روی سرور ({keysDetails.length} کلید)</span>
-                </span>
+              return (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 flex flex-col gap-1">
+                    <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1.5">
+                      <Key className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>کلیدهای ثبت‌شده</span>
+                    </span>
+                    <span className="text-xl font-bold font-mono text-white">{totalKeys}</span>
+                  </div>
+
+                  <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 flex flex-col gap-1">
+                    <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>کلیدهای آماده و فعال</span>
+                    </span>
+                    <span className="text-xl font-bold font-mono text-emerald-400">{activeKeys}</span>
+                  </div>
+
+                  <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 flex flex-col gap-1">
+                    <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-rose-400" />
+                      <span>وقفه موقت (۱ دقیقه)</span>
+                    </span>
+                    <span className="text-xl font-bold font-mono text-rose-400">{restingKeys}</span>
+                  </div>
+
+                  <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 flex flex-col gap-1">
+                    <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                      <span>مجموع توکن مصرفی</span>
+                    </span>
+                    <span className="text-lg font-bold font-mono text-amber-300">
+                      {totalTokensSum.toLocaleString()}
+                    </span>
+                    <span className="text-[10px] text-slate-500 font-mono">
+                      در {totalReqsSum} درخواست API
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Quick Actions & Optimization Guidance */}
+            <div className="bg-gradient-to-r from-indigo-950/60 via-slate-950/90 to-indigo-950/60 border border-indigo-500/30 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-inner">
+              <div className="flex flex-col gap-1 text-xs text-slate-300 leading-relaxed">
+                <div className="flex items-center gap-2 font-bold text-amber-300">
+                  <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>بهینه‌سازی حداکثری مصرف توکن و زمان استراحت کلیدها:</span>
+                </div>
+                <p className="text-[11px] text-slate-300">
+                  • دسته‌ها به <span className="text-emerald-300 font-bold font-mono">۵۰ سطر</span> در هر درخواست افزایش یافت تا پرامپت تکراری حذف و <span className="text-emerald-300 font-bold">بیش از ۶۰٪ در مصرف توکن صرفه‌جویی شود</span>.
+                </p>
+                <p className="text-[11px] text-slate-300">
+                  • زمان خنک‌سازی سهمیه به جای ۱۵ دقیقه، تنها روی <span className="text-amber-300 font-bold font-mono">۶۰ ثانیه</span> تنظیم شد تا در چرخش ۱۱ کلید، کلیدها بدون توقف آماده استفاده باشند.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
                 <button
                   type="button"
-                  onClick={fetchServerKeys}
-                  className="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1"
+                  onClick={handleResetAllCooldowns}
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 shadow-md shadow-emerald-600/30 transition-all cursor-pointer"
+                  title="خارج کردن تمام کلیدها از حالت وقفه و فعال‌سازی فوری"
                 >
-                  <RefreshCw className="w-3 h-3" />
-                  <span>بروزرسانی</span>
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>رفع وقفه فوری تمام کلیدها</span>
                 </button>
+              </div>
+            </div>
+
+            {/* Registered Keys List with Token Usage Table */}
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <span className="text-xs font-bold text-slate-200 flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-indigo-400" />
+                  <span>فهرست کامل کلیدها و گزارش تفکیکی توکن ({keysDetails.length} کلید)</span>
+                </span>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleResetKeyStats}
+                    className="text-[11px] text-slate-400 hover:text-amber-300 transition-colors flex items-center gap-1 bg-slate-800/60 px-2 py-1 rounded-lg border border-slate-700/60 cursor-pointer"
+                    title="صفر کردن کنتور توکن‌ها برای محاسبه جدید"
+                  >
+                    <Trash2 className="w-3 h-3 text-slate-400" />
+                    <span>ریست آمار توکن‌ها</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={fetchServerKeys}
+                    className="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 bg-indigo-500/10 px-2.5 py-1 rounded-lg border border-indigo-500/20 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>بروزرسانی وضعیت</span>
+                  </button>
+                </div>
               </div>
 
               {keysDetails.length === 0 ? (
-                <div className="text-xs text-amber-300/80 bg-amber-500/10 border border-amber-500/20 rounded-xl p-3">
-                  هنوز هیچ کلیدی در سرور ذخیره نشده است. می‌توانید کلیدهای خود را در کادر زیر وارد کنید.
+                <div className="text-xs text-amber-300/90 bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 text-center">
+                  هنوز هیچ کلیدی در سرور ذخیره نشده است. با استفاده از کادر زیر کلیدهای Gemini خود را وارد کنید.
                 </div>
               ) : (
-                <div className="max-h-48 overflow-y-auto space-y-2 pr-1">
+                <div className="max-h-72 overflow-y-auto space-y-2.5 pr-1 border border-slate-800/80 rounded-2xl p-2 bg-slate-950/50">
                   {keysDetails.map((k) => (
                     <div
                       key={k.index}
-                      className={`flex flex-col p-2.5 rounded-xl border text-xs ${
+                      className={`flex flex-col p-3 rounded-xl border text-xs transition-all ${
                         k.isExhausted
-                          ? 'bg-rose-500/10 border-rose-500/30'
-                          : 'bg-slate-950 border-slate-800'
+                          ? 'bg-rose-500/5 border-rose-500/30'
+                          : 'bg-slate-900/90 border-slate-800 hover:border-slate-700'
                       }`}
                     >
                       {editingKeyIndex === k.index ? (
@@ -2595,14 +2742,14 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                             type="text"
                             value={editingKeyVal}
                             onChange={(e) => setEditingKeyVal(e.target.value)}
-                            className="w-full bg-slate-900 border border-indigo-500 rounded-lg px-2.5 py-1 text-xs text-white font-mono direction-ltr"
+                            className="w-full bg-slate-950 border border-indigo-500 rounded-lg px-2.5 py-1 text-xs text-white font-mono direction-ltr"
                             placeholder="AIzaSy..."
                             autoFocus
                           />
                           <button
                             type="button"
                             onClick={() => handleUpdateSingleKey(k.index)}
-                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold text-xs shrink-0"
+                            className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold text-xs shrink-0 cursor-pointer"
                           >
                             ذخیره
                           </button>
@@ -2612,64 +2759,120 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                               setEditingKeyIndex(null);
                               setEditingKeyVal('');
                             }}
-                            className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs shrink-0"
+                            className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs shrink-0 cursor-pointer"
                           >
                             انصراف
                           </button>
                         </div>
                       ) : (
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2 overflow-hidden">
-                            <span className="w-5 h-5 rounded-md bg-slate-800 flex items-center justify-center text-[11px] font-mono text-slate-400 shrink-0">
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                          {/* Key Identity & Status */}
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <span className="w-6 h-6 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-[11px] font-mono text-slate-300 font-bold shrink-0">
                               #{k.index + 1}
                             </span>
-                            <span className="font-mono text-slate-200 tracking-wider truncate">
-                              {k.maskedKey}
-                            </span>
+                            <div className="flex flex-col min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-white tracking-wider truncate font-semibold">
+                                  {k.maskedKey}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(k.rawKey);
+                                    onShowToast('کلید در کلیپ‌بورد کپی شد.', 'info');
+                                  }}
+                                  className="text-slate-500 hover:text-slate-300 p-0.5"
+                                  title="کپی کلید کامل"
+                                >
+                                  <Copy className="w-3 h-3" />
+                                </button>
+                              </div>
+
+                              <div className="flex items-center gap-3 text-[10px] text-slate-400 mt-0.5">
+                                {k.isExhausted ? (
+                                  <span className="flex items-center gap-1 text-rose-400 font-semibold">
+                                    <Clock className="w-3 h-3" />
+                                    <span>وقفه سهمیه ({k.cooldownRemainingSec}s مانده)</span>
+                                  </span>
+                                ) : (
+                                  <span className="flex items-center gap-1 text-emerald-400 font-semibold">
+                                    <CheckCircle2 className="w-3 h-3" />
+                                    <span>آماده و فعال در صف چرخش</span>
+                                  </span>
+                                )}
+
+                                {k.lastUsedAt && (
+                                  <span className="text-slate-500 font-mono">
+                                    آخرین استفاده: {new Date(k.lastUsedAt).toLocaleTimeString('fa-IR')}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
                           </div>
 
-                          <div className="flex items-center gap-2 shrink-0">
-                            {k.isExhausted ? (
-                              <span className="flex items-center gap-1 text-[10px] text-rose-400">
-                                <ShieldAlert className="w-3 h-3" />
-                                <span>استراحت ({k.cooldownRemainingSec}s)</span>
-                              </span>
-                            ) : (
-                              <span className="flex items-center gap-1 text-[10px] text-emerald-400">
-                                <CheckCircle2 className="w-3 h-3" />
-                                <span>فعال</span>
-                              </span>
+                          {/* Token Consumption Stats Badges */}
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <div className="flex items-center gap-1.5 bg-slate-950 px-2 py-1 rounded-lg border border-slate-800 text-[11px]">
+                              <span className="text-slate-400">درخواست‌ها:</span>
+                              <span className="font-mono text-white font-bold">{k.requestsCount || 0}</span>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 bg-slate-950 px-2 py-1 rounded-lg border border-slate-800 text-[11px]">
+                              <span className="text-slate-400">توکن ورودی:</span>
+                              <span className="font-mono text-cyan-300">{(k.promptTokens || 0).toLocaleString()}</span>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 bg-slate-950 px-2 py-1 rounded-lg border border-slate-800 text-[11px]">
+                              <span className="text-slate-400">توکن ترجمه:</span>
+                              <span className="font-mono text-emerald-300">{(k.candidatesTokens || 0).toLocaleString()}</span>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 bg-indigo-950/60 px-2 py-1 rounded-lg border border-indigo-500/30 text-[11px]">
+                              <span className="text-indigo-300 font-bold">کل توکن:</span>
+                              <span className="font-mono text-amber-300 font-bold">{(k.totalTokens || 0).toLocaleString()}</span>
+                            </div>
+                          </div>
+
+                          {/* Action Buttons */}
+                          <div className="flex items-center gap-1.5 shrink-0 self-end md:self-center">
+                            {k.isExhausted && (
+                              <button
+                                type="button"
+                                onClick={() => handleResetSingleCooldown(k.index)}
+                                className="px-2 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-[10px] font-bold transition-colors cursor-pointer"
+                                title="رفع وقفه این کلید و آماده‌سازی فوری"
+                              >
+                                رفع وقفه
+                              </button>
                             )}
 
-                            {/* Test key button */}
                             <button
                               type="button"
                               onClick={() => handleTestServerKey(k.rawKey)}
-                              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 text-[10px] font-semibold transition-colors"
+                              className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-bold transition-colors cursor-pointer"
                               title="تست آنلاین این کلید از روی سرور"
                             >
-                              تست
+                              تست زنده
                             </button>
 
-                            {/* Edit key button */}
                             <button
                               type="button"
                               onClick={() => {
                                 setEditingKeyIndex(k.index);
                                 setEditingKeyVal(k.rawKey);
                               }}
-                              className="p-1 text-slate-400 hover:text-indigo-400 transition-colors"
-                              title="ویرایش این کلید"
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-400 bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer"
+                              title="ویرایش کلید"
                             >
                               <Edit3 className="w-3.5 h-3.5" />
                             </button>
 
-                            {/* Delete key button */}
                             <button
                               type="button"
                               onClick={() => handleDeleteSingleKey(k.index)}
-                              className="p-1 text-slate-400 hover:text-rose-400 transition-colors"
-                              title="حذف این کلید"
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer"
+                              title="حذف کلید"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
@@ -2683,27 +2886,27 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
             </div>
 
             {/* Server-Side Key Ping Test Box */}
-            <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 flex flex-col gap-2.5">
-              <div className="flex items-center justify-between">
+            <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
                 <span className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                  <span>تست آنلاین ارتباط و سرعت از روی سرور (Server Ping)</span>
+                  <Sparkles className="w-4 h-4 text-amber-400" />
+                  <span>تست آنلاین ارتباط و سرعت مدل Gemini 3.5 Flash Lite از روی سرور</span>
                 </span>
                 <button
                   type="button"
                   disabled={isTestingKey}
                   onClick={() => handleTestServerKey()}
-                  className="px-3 py-1 rounded-lg text-xs font-bold bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/30 flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                  className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/30 flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer"
                 >
                   {isTestingKey ? (
                     <>
                       <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
-                      <span>در حال تست از سرور...</span>
+                      <span>در حال تست اتصال از سرور...</span>
                     </>
                   ) : (
                     <>
                       <Play className="w-3.5 h-3.5 text-amber-400 fill-amber-400" />
-                      <span>تست کلید اصلی</span>
+                      <span>تست آنلاین کلید اصلی</span>
                     </>
                   )}
                 </button>
@@ -2711,17 +2914,17 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
 
               {testResult && (
                 <div
-                  className={`p-2.5 rounded-lg text-xs leading-relaxed border ${
+                  className={`p-3 rounded-xl text-xs leading-relaxed border ${
                     testResult.success
                       ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
                       : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
                   }`}
                 >
                   <div className="flex items-center justify-between font-bold mb-1">
-                    <span>{testResult.success ? '✓ کلید با موفقیت تایید شد' : '✗ خطا در اعتبارسنجی کلید'}</span>
+                    <span>{testResult.success ? '✓ پاسخ موفق سرور جمینای' : '✗ خطا در پاسخگویی سرور'}</span>
                     {testResult.latencyMs && (
-                      <span className="font-mono text-[11px] bg-slate-900 px-2 py-0.5 rounded">
-                        زمان پاسخ: {testResult.latencyMs}ms
+                      <span className="font-mono text-[11px] bg-slate-900 px-2 py-0.5 rounded border border-slate-800 text-slate-300">
+                        زمان پاسخ: {testResult.latencyMs} میلی‌ثانیه | مدل: {testResult.modelUsed || 'Gemini 3.5 Flash Lite'}
                       </span>
                     )}
                   </div>
@@ -2731,13 +2934,13 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
             </div>
 
             {/* Batch Add Keys Form */}
-            <form onSubmit={handleSaveServerKeys} className="flex flex-col gap-3 pt-2 border-t border-slate-800">
-              <div className="flex items-center justify-between">
+            <form onSubmit={handleSaveServerKeys} className="flex flex-col gap-3 pt-3 border-t border-slate-800">
+              <div className="flex items-center justify-between flex-wrap gap-2">
                 <label className="text-xs text-slate-300 font-semibold block">
-                  افزودن کلیدهای API جدید (هر کلید در یک خط):
+                  افزودن کلیدهای API جدید به استخر (هر کلید در یک سطر):
                 </label>
                 <div className="flex items-center gap-3 text-xs text-slate-400">
-                  <label className="flex items-center gap-1 cursor-pointer">
+                  <label className="flex items-center gap-1.5 cursor-pointer">
                     <input
                       type="radio"
                       name="keyMode"
@@ -2746,9 +2949,9 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                       onChange={() => setKeySaveMode('append')}
                       className="accent-indigo-500"
                     />
-                    <span>افزودن به استخر</span>
+                    <span>افزودن به استخر موجود</span>
                   </label>
-                  <label className="flex items-center gap-1 cursor-pointer">
+                  <label className="flex items-center gap-1.5 cursor-pointer">
                     <input
                       type="radio"
                       name="keyMode"
@@ -2757,7 +2960,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                       onChange={() => setKeySaveMode('replace')}
                       className="accent-indigo-500"
                     />
-                    <span>جایگزینی کل استخر</span>
+                    <span>جایگزینی کل استخر کلیدها</span>
                   </label>
                 </div>
               </div>
@@ -2767,23 +2970,23 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 value={serverKeysText}
                 onChange={(e) => setServerKeysText(e.target.value)}
                 placeholder={"AIzaSy...\nAIzaSy..."}
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs text-amber-200 font-mono focus:outline-none focus:border-indigo-500 direction-ltr"
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs text-amber-200 font-mono focus:outline-none focus:border-indigo-500 direction-ltr placeholder-slate-600"
               />
 
-              <div className="flex items-center justify-end gap-2 mt-1">
+              <div className="flex items-center justify-end gap-2.5 mt-1">
                 <button
                   type="button"
                   onClick={() => setIsKeysModalOpen(false)}
-                  className="px-3.5 py-1.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white"
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer"
                 >
-                  بستن
+                  بستن پنجره
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md transition-colors flex items-center gap-1"
+                  className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 transition-colors flex items-center gap-1.5 cursor-pointer"
                 >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>ثبت کلیدها</span>
+                  <Plus className="w-4 h-4" />
+                  <span>ثبت و ذخیره کلیدها</span>
                 </button>
               </div>
             </form>

@@ -3,6 +3,7 @@ import {
   getDatabase, 
   getAllProjects, 
   getProjectById, 
+  getFolderById,
   updateProject, 
   getServerKeys, 
   getActiveKeyIndex, 
@@ -13,15 +14,28 @@ import {
   saveDatabaseSync, 
   getServerConfig,
   resetProjectTranslation,
+  recordKeyUsage,
   ServerSubtitleProject 
 } from './database';
 
 const FLASH_LITE_MODEL = 'gemini-3.1-flash-lite';
-const BATCH_SIZE = 20;
+// Optimized batch size: 40 cues per request gives rich 2-3 minute episodic context while keeping prompt token repetition minimal
+const BATCH_SIZE = 40;
 
 // Rate limiting & RPM pacing (minimum gap between requests on the same key ensures <15 RPM without hitting 429)
 const lastKeyCallTime = new Map<string, number>();
 const MIN_CALL_GAP_PER_KEY_MS = 4200; // 4.2 seconds minimum gap per key
+
+// Progressive Patient Backoff: ensures the system never rushes when all keys hit rate limits or exhaustion
+let consecutiveAllExhaustedRounds = 0;
+let nextBackoffRetryTimestamp = 0;
+const MAX_CONSECUTIVE_EXHAUSTED_ROUNDS = 5;
+const BACKOFF_DELAYS_MS = [60_000, 120_000, 180_000, 240_000, 300_000]; // 1m, 2m, 3m, 4m, 5m
+
+export function resetWorkerExhaustionBackoff(): void {
+  consecutiveAllExhaustedRounds = 0;
+  nextBackoffRetryTimestamp = 0;
+}
 
 let workerInterval: NodeJS.Timeout | null = null;
 const activeProjectJobIds = new Set<string>();
@@ -187,40 +201,58 @@ export async function testServerKey(apiKey: string): Promise<{
   }
 }
 
+interface SubtitlePromptContext {
+  videoTitle?: string;
+  folderName?: string;
+  previousContextCues?: Array<{ original: string; translated: string }>;
+}
+
 /**
- * High-quality Subtitle System Prompt
+ * High-quality Subtitle System Prompt with Episode & Dialogue Continuity Context
  */
 function buildSubtitlePrompt(
   items: Array<{ id: number; text: string }>,
   targetLanguage: string,
   tone: string,
-  customPrompt?: string
+  customPrompt?: string,
+  context?: SubtitlePromptContext
 ): { systemInstruction: string; userContent: string } {
   const toneMap: Record<string, string> = {
-    cinematic: 'سینمایی، فاخر و دراماتیک (لحن شیوا و متناسب با فیلم‌ها و مستندهای برجسته)',
-    conversational: 'محاوره‌ای، روان و عامیانه (زبان صمیمی، اصطلاحات روزمره و طبیعی)',
-    formal: 'رسمی، کتابی و علمی (وفاداری کامل به واژگان معیار و علمی)',
-    epic: 'حماسی، افسانه‌ای و پرشور (مناسب متون تاریخی، کیهانی و علمی-تخیلی)',
-    humorous: 'طنز، شاداب و طعنه‌آمیز با حفظ اصطلاحات طنز فرهنگ مقصد',
+    cinematic: 'سینمایی و فاخر (شیوا و متناسب با فیلم‌ها و مستندهای برجسته)',
+    conversational: 'محاوره‌ای و عامیانه (صمیمی، روان و اصطلاحات روزمره)',
+    formal: 'رسمی، کتابی و علمی (وفاداری به واژگان معیار)',
+    documentary: 'مستند علمی و پژوهشی (افشای کیهانی با اصطلاحات دقیق تخصصی)',
+    epic: 'حماسی، افسانه‌ای و تاریخی (مناسب داستان‌های حماسی و اساطیری)',
+    action: 'اکشن و مهیج (جملات ضربتی و پرانرژی)',
+    humorous: 'طنز و شوخ‌طبعانه با حفظ بار کمدی',
+    horror: 'ترسناک، رازآلود و دلهره‌آور',
+    educational: 'آموزشی و درسی با دقت مفاهیم',
+    poetic: 'ادبی و شاعرانه با واژگان فاخر',
+    animation: 'کودکانه و انیمیشن با زبان ساده و شاداب',
   };
 
   const selectedTone = toneMap[tone] || toneMap.cinematic;
 
-  const systemInstruction = `شما یک مترجم ارشد زیرنویس‌های سینمایی، مستندهای علمی و سریال‌های تلویزیونی هستید.
-زبان مقصد: ${targetLanguage === 'fa' ? 'فارسی (Persian)' : targetLanguage}
-لحن ترجمه: ${selectedTone}
-${customPrompt ? `دستورالعمل ویژه کاربر: "${customPrompt}"` : ''}
+  const folderHeader = context?.folderName ? `عنوان مجموعه / دسته‌بندی: «${context.folderName}»\n` : '';
+  const videoHeader = context?.videoTitle ? `عنوان قسمت / فیلم: «${context.videoTitle}» (مدت تقریبی ویدیو ۳۰ تا ۴۰ دقیقه)\n` : '';
 
-قوانین حیاتی ترجمه زیرنویس:
-۱. هماهنگی و یکدستی لحن: جملات باید با جریان طبیعی مکالمات فیلم هماهنگ باشند. از ترجمه ماشینی کلمه‌به‌کلمه اکیداً خودداری کرده و مفهوم اصطلاحات را به زیباترین و شیواترین شکل برگردانید.
-۲. حفظ تگ‌ها و کاراکترهای فنی: تگ‌های HTML نظیر <i>, </i>, <b>, </b> و کدهای زیرنویس نظیر {\\an8} یا \\n را دقیقاً در جای مناسب نگه دارید و دست‌نخورده بازگردانید.
-۳. تایم‌بندی و شناسه‌ها: هر آیتم دارای یک شناسه (id) مشخص است. ترجمه دقیق هر آیتم باید فقط در فیلد text بازگردانده شود. هیچ آیتمی نباید ادغام، حذف یا جا انداخته شود.
-۴. فرمت پاسخ: فقط و فقط یک آبجکت JSON معتبر به فرمت زیر بدون هیچ متن یا توضیحات اضافی بازگردانید:
-{
-  "translations": [
-    { "id": 1, "text": "متن ترجمه شده" }
-  ]
-}`;
+  let previousContextStr = '';
+  if (context?.previousContextCues && context.previousContextCues.length > 0) {
+    previousContextStr = '\nزمینه دیالوگ‌های قبلی همین ویدیو (جهت حفظ پیوستگی موضوعی، ضمایر، فاعل و یکدستی اصطلاحات تخصصی):\n' +
+      context.previousContextCues.map((c) => `- "${c.original}" -> "${c.translated}"`).join('\n') + '\n';
+  }
+
+  const systemInstruction = `شما مترجم ارشد و حرفه‌ای زیرنویس فیلم، سریال و مستندهای اپیزودیک (نظیر مستندهای افشای کیهانی و فیلم‌های بلند ۳۰ الی ۴۰ دقیقه‌ای) هستید.
+${folderHeader}${videoHeader}زبان مقصد: ${targetLanguage === 'fa' ? 'فارسی' : targetLanguage}
+لحن ترجمه: ${selectedTone}${customPrompt ? `\nدستور اختصاصی کاربر: ${customPrompt}` : ''}
+${previousContextStr}
+دستورالعمل‌های حیاتی با دقت بالا:
+۱. پیوستگی و درک عمیق موضوع: با توجه به موضوع کل ویدیو و سیر دیالوگ‌ها، مفاهیم علمی، کیهانی، روایی، فلسفی و تخصصی را با درک زمینه سخن گوینده، به روان‌ترین و دقیق‌ترین فارسی برگردانید.
+۲. تطابق دقیق ۱ به ۱ شناسه‌ها: هر شناسه ورودی (id) باید دقیقاً یک شناسه در خروجی داشته باشد. ادغام چند سطر در یک سطر یا حذف حتی یک سطر اکیداً ممنوع است.
+۳. تایم‌بندی و ترتیب سطرها کاملاً ثابت است و هرگز تغییر نمی‌کند؛ شما فقط متن ترجمه را در فیلد text قرار می‌دهید.
+۴. تگ‌های زیرنویس نظیر <i>, </i>, <b>, </b>, {\\an8} و شکست خطوط \\n دقیقاً در جای مناسب خود حفظ شوند.
+۵. خروجی فقط و فقط یک شیء JSON معتبر به فرمت زیر باشد (بدون هیچ کلمه اضافی در ابتدا یا انتها):
+{"translations":[{"id":1,"text":"متن ترجمه شده روان و باکیفیت"}]}`;
 
   const userContent = JSON.stringify(items);
 
@@ -229,6 +261,7 @@ ${customPrompt ? `دستورالعمل ویژه کاربر: "${customPrompt}"` :
 
 /**
  * Execute translation of a single batch using a leased API key with auto-fallback to alternate keys
+ * and verification that no cue is skipped or dropped.
  */
 async function translateBatchWithDedicatedKey(
   items: Array<{ id: number; text: string }>,
@@ -236,13 +269,14 @@ async function translateBatchWithDedicatedKey(
   tone: string,
   customPrompt: string | undefined,
   primaryKey: string,
-  candidateKeys: string[]
+  candidateKeys: string[],
+  context?: SubtitlePromptContext
 ): Promise<{
   translations: Array<{ id: number; text: string }>;
   tokens: { prompt: number; candidates: number; total: number };
   keyUsed: string;
 }> {
-  const { systemInstruction, userContent } = buildSubtitlePrompt(items, targetLanguage, tone, customPrompt);
+  const { systemInstruction, userContent } = buildSubtitlePrompt(items, targetLanguage, tone, customPrompt, context);
 
   const keysQueue = [primaryKey, ...candidateKeys.filter((k) => k !== primaryKey)];
 
@@ -288,8 +322,46 @@ async function translateBatchWithDedicatedKey(
 
       if (parsedJson && Array.isArray(parsedJson.translations) && parsedJson.translations.length > 0) {
         const usage = response.usageMetadata;
+        const returnedMap = new Map<number, string>();
+        parsedJson.translations.forEach((t: any) => {
+          if (t && typeof t.id === 'number' && t.text && String(t.text).trim()) {
+            returnedMap.set(t.id, String(t.text).trim());
+          }
+        });
+
+        // Verify if any cue was dropped by the model
+        const missing = items.filter((it) => !returnedMap.has(it.id));
+        if (missing.length > 0 && missing.length <= 5) {
+          // Attempt a quick micro-call for the missed 1-5 cues so nothing is ever dropped
+          try {
+            const microPrompt = buildSubtitlePrompt(missing, targetLanguage, tone, customPrompt, context);
+            const microRes = await ai.models.generateContent({
+              model: FLASH_LITE_MODEL,
+              contents: microPrompt.userContent,
+              config: {
+                systemInstruction: microPrompt.systemInstruction,
+                responseMimeType: 'application/json',
+              },
+            });
+            const microRaw = microRes.text || '';
+            const microParsed = JSON.parse(microRaw);
+            if (microParsed && Array.isArray(microParsed.translations)) {
+              microParsed.translations.forEach((mt: any) => {
+                if (mt && typeof mt.id === 'number' && mt.text) {
+                  returnedMap.set(mt.id, String(mt.text).trim());
+                }
+              });
+            }
+          } catch {}
+        }
+
+        const finalTranslations = items.map((it) => ({
+          id: it.id,
+          text: returnedMap.get(it.id) || it.text,
+        }));
+
         return {
-          translations: parsedJson.translations,
+          translations: finalTranslations,
           tokens: {
             prompt: usage?.promptTokenCount || 0,
             candidates: usage?.candidatesTokenCount || 0,
@@ -370,7 +442,6 @@ async function processSingleProjectBatch(projectId: string): Promise<void> {
     project.lastError = 'تمامی کلیدهای سرور موقتاً سهمیه خود را تمام کرده‌اند (429). ترجمه به طور خودکار به محض آزادسازی کلید یا افزودن کلید جدید ادامه خواهد یافت (تمام سطرهای قبلی ذخیره شده‌اند).';
     project.errorMessage = project.lastError;
     saveDatabaseSync();
-    lastWorkerStatusMessage = 'تمامی کلیدهای سرور در وضعیت خنک‌سازی هستند. سطرها ذخیره شده و منتظر بازیابی سهمیه...';
     return;
   }
 
@@ -382,6 +453,20 @@ async function processSingleProjectBatch(projectId: string): Promise<void> {
   const batchCues = untranslatedCues.slice(0, BATCH_SIZE);
   const simplifiedBatch = batchCues.map((c) => ({ id: c.id, text: c.originalText }));
 
+  // Gather folder name and recent translated cues for continuity context
+  const folder = getFolderById(project.folderId);
+  const alreadyTranslated = project.items.filter((i) => Boolean(i.translatedText && i.translatedText.trim()));
+  const previousContextCues = alreadyTranslated.slice(-2).map((c) => ({
+    original: c.originalText,
+    translated: c.translatedText,
+  }));
+
+  const context: SubtitlePromptContext = {
+    videoTitle: project.name,
+    folderName: folder?.name,
+    previousContextCues,
+  };
+
   try {
     const result = await translateBatchWithDedicatedKey(
       simplifiedBatch,
@@ -389,7 +474,8 @@ async function processSingleProjectBatch(projectId: string): Promise<void> {
       project.tone,
       project.customPrompt,
       leasedKey,
-      allKeys
+      allKeys,
+      context
     );
 
     // Update translated items in memory (strictly preserving original timestamps and cue ordering)
@@ -406,6 +492,10 @@ async function processSingleProjectBatch(projectId: string): Promise<void> {
       }
     }
 
+    // Successful batch translates -> reset progressive backoff
+    consecutiveAllExhaustedRounds = 0;
+    nextBackoffRetryTimestamp = 0;
+
     // Update counts & token stats
     project.translatedCues = project.items.filter((i) => Boolean(i.translatedText && i.translatedText.trim())).length;
     project.tokenUsage.promptTokens += result.tokens.prompt;
@@ -419,6 +509,7 @@ async function processSingleProjectBatch(projectId: string): Promise<void> {
     const db = getDatabase();
     db.stats.totalTokensUsed += result.tokens.total;
     db.stats.totalTranslations++;
+    recordKeyUsage(result.keyUsed || leasedKey, result.tokens);
 
     if (project.translatedCues >= project.totalCues) {
       project.status = 'completed';
@@ -456,6 +547,7 @@ async function processSingleProjectBatch(projectId: string): Promise<void> {
 
 /**
  * Main Worker Tick: Dispatches parallel project jobs up to maxConcurrentProjects
+ * with Patient Progressive Backoff when all keys hit exhaustion limits.
  */
 async function processTick(): Promise<void> {
   const db = getDatabase();
@@ -464,6 +556,42 @@ async function processTick(): Promise<void> {
 
   // If no keys configured, do not dispatch
   if (allKeys.length === 0) return;
+
+  const now = Date.now();
+  const allKeysExhausted = allKeys.length > 0 && allKeys.every((k) => isKeyExhausted(k));
+
+  // Patient Progressive Backoff: do NOT rush when all keys hit quota limits
+  if (allKeysExhausted) {
+    if (now < nextBackoffRetryTimestamp) {
+      const waitSec = Math.max(1, Math.round((nextBackoffRetryTimestamp - now) / 1000));
+      lastWorkerStatusMessage = `تمامی کلیدها در وقفه سهمیه هستند. شکیبایی صبورانه سرور بدون عجله (${waitSec} ثانیه تا تست مجدد - دور ${consecutiveAllExhaustedRounds} از ${MAX_CONSECUTIVE_EXHAUSTED_ROUNDS}). سطرهای قبلی در دیسک امن هستند.`;
+      return;
+    }
+
+    if (consecutiveAllExhaustedRounds >= MAX_CONSECUTIVE_EXHAUSTED_ROUNDS) {
+      // 5 consecutive rounds over 15+ minutes yielded all keys exhausted!
+      let changed = false;
+      db.projects.forEach((p) => {
+        if (p.status === 'translating' || p.status === 'queued') {
+          p.status = 'waiting_for_keys';
+          p.lastError = 'سهمیه روزانه تمامی کلیدها به اتمام رسیده است (پس از ۵ نوبت بررسی صبورانه سرور). ترجمه با حفظ ۱۰۰٪ سطرهای ترجمه‌شده متوقف شد تا کلید یا سهمیه جدید اضافه گردد.';
+          p.errorMessage = p.lastError;
+          changed = true;
+        }
+      });
+      if (changed) saveDatabaseSync();
+      lastWorkerStatusMessage = 'سهمیه روزانه تمامی کلیدها به اتمام رسیده است. ترجمه متوقف شد تا کلید جدید یا سهمیه شارژ شود (تمام سطرها ذخیره شده‌اند).';
+      return;
+    }
+
+    // Schedule next progressive backoff delay
+    const delay = BACKOFF_DELAYS_MS[Math.min(consecutiveAllExhaustedRounds, BACKOFF_DELAYS_MS.length - 1)];
+    consecutiveAllExhaustedRounds++;
+    nextBackoffRetryTimestamp = now + delay;
+    const delayMinutes = Math.round(delay / 60000);
+    lastWorkerStatusMessage = `تمامی کلیدها به سقف سهمیه رسیده‌اند. سیستم بدون عجله به مدت ${delayMinutes} دقیقه استراحت می‌کند و سپس وضعیت کلیدها را مجدداً خواهد سنجید (دور ${consecutiveAllExhaustedRounds} از ${MAX_CONSECUTIVE_EXHAUSTED_ROUNDS})...`;
+    return;
+  }
 
   const maxWorkers = Math.max(1, Math.min(config.maxConcurrentProjects || 2, Math.max(1, allKeys.length)));
 
@@ -480,7 +608,6 @@ async function processTick(): Promise<void> {
     if (p.status === 'translating') return true;
     if (p.status === 'queued') return true;
     if (p.status === 'waiting_for_keys') {
-      // Check if any non-exhausted keys are now available
       return allKeys.some((k) => !isKeyExhausted(k));
     }
     return false;
