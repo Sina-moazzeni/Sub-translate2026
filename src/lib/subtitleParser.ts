@@ -703,12 +703,44 @@ export function exportSubtitleFile(
   }
 }
 
+export function normalizeTimestampSRT(ts?: string, sec?: number): string {
+  if (ts && /^\d{1,2}:\d{2}:\d{2}[.,]\d{2,3}$/.test(ts.trim())) {
+    const clean = ts.trim().replace('.', ',');
+    const parts = clean.split(/[:,]/);
+    if (parts.length === 4) {
+      const h = parts[0].padStart(2, '0');
+      const m = parts[1].padStart(2, '0');
+      const s = parts[2].padStart(2, '0');
+      const ms = parts[3].padEnd(3, '0').slice(0, 3);
+      return `${h}:${m}:${s},${ms}`;
+    }
+    return clean;
+  }
+  return secondsToSRT(sec ?? 0);
+}
+
+export function normalizeTimestampVTT(ts?: string, sec?: number): string {
+  if (ts && /^\d{1,2}:\d{2}:\d{2}[.,]\d{2,3}$/.test(ts.trim())) {
+    const clean = ts.trim().replace(',', '.');
+    const parts = clean.split(/[:.]/);
+    if (parts.length === 4) {
+      const h = parts[0].padStart(2, '0');
+      const m = parts[1].padStart(2, '0');
+      const s = parts[2].padStart(2, '0');
+      const ms = parts[3].padEnd(3, '0').slice(0, 3);
+      return `${h}:${m}:${s}.${ms}`;
+    }
+    return clean;
+  }
+  return secondsToVTT(sec ?? 0);
+}
+
 function exportSRT(items: SubtitleItem[]): string {
   return items
     .map((item, index) => {
       const text = item.translatedText.trim() || item.originalText.trim();
-      const start = secondsToSRT(item.startSeconds);
-      const end = secondsToSRT(item.endSeconds);
+      const start = normalizeTimestampSRT(item.startTime, item.startSeconds);
+      const end = normalizeTimestampSRT(item.endTime, item.endSeconds);
       return `${index + 1}\n${start} --> ${end}\n${text}\n`;
     })
     .join('\n');
@@ -719,8 +751,8 @@ function exportVTT(items: SubtitleItem[], rawHeader?: string): string {
   const body = items
     .map((item) => {
       const text = item.translatedText.trim() || item.originalText.trim();
-      const start = secondsToVTT(item.startSeconds);
-      const end = secondsToVTT(item.endSeconds);
+      const start = normalizeTimestampVTT(item.startTime, item.startSeconds);
+      const end = normalizeTimestampVTT(item.endTime, item.endSeconds);
       const settingsStr = item.styleTags ? ` ${item.styleTags}` : '';
       // FIX (L9): restore the cue identifier when the source file had one
       const idStr = item.cueId ? `${item.cueId}\n` : '';

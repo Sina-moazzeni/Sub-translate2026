@@ -18,6 +18,7 @@ import {
   HelpCircle,
   Film,
   Gamepad2,
+  Folder,
   Send,
   Github,
   Server
@@ -90,7 +91,9 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center justify-between w-full md:w-auto gap-4 shrink-0">
           <div className="flex items-center gap-2.5 sm:gap-3">
             <div className={`w-9 h-9 sm:w-10 sm:h-10 rounded-xl overflow-hidden shadow-sm p-0.5 border transition-all duration-300 shrink-0 ${
-              mode === 'game'
+              mode === 'folders'
+                ? 'border-emerald-500/50 shadow-emerald-500/10'
+                : mode === 'game'
                 ? 'border-purple-500/50 shadow-purple-500/10'
                 : 'border-blue-500/50 shadow-blue-500/10'
             }`}>
@@ -108,23 +111,38 @@ export const Header: React.FC<HeaderProps> = ({
                   {t.appTitle}
                 </h1>
                 <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border hidden sm:inline-flex items-center gap-1 shrink-0 ${
-                  mode === 'game'
+                  mode === 'folders'
+                    ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
+                    : mode === 'game'
                     ? 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20'
                     : 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20'
                 }`}>
-                  {mode === 'game' ? 'Game Mode' : 'Cinema Mode'}
+                  {mode === 'folders' ? 'پوشه‌ها و سرور' : mode === 'game' ? 'Game Mode' : 'Cinema Mode'}
                 </span>
               </div>
               <p className="text-[11px] text-slate-500 dark:text-slate-400 hidden lg:block leading-tight truncate max-w-[220px] xl:max-w-[280px]">
-                {mode === 'cinema' ? t.appSubtitle : t.modeGameDesc}
+                {mode === 'folders' ? 'پوشه‌بندی، دیتابیس و ترجمه پس‌زمینه سرور' : mode === 'cinema' ? t.appSubtitle : t.modeGameDesc}
               </p>
             </div>
           </div>
         </div>
 
-        {/* Center: Standalone Mode Switcher (Cinema vs Game) - Isolated to prevent overlaps */}
+        {/* Center: Standalone Mode Switcher (Folders vs Cinema vs Game) */}
         <div className="flex items-center justify-center shrink-0 w-full md:w-auto">
-          <div className="flex items-center bg-slate-100 dark:bg-slate-900/90 p-1 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
+          <div className="flex items-center bg-slate-100 dark:bg-slate-900/90 p-1 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs gap-1">
+            <button
+              type="button"
+              onClick={() => setMode('folders')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                mode === 'folders'
+                  ? 'bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-500/30'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+              }`}
+              title="پوشه‌بندی، دیتابیس زیرنویس‌ها و ترجمه خودکار در پس‌زمینه سرور (بدون نیاز به باز بودن مرورگر)"
+            >
+              <Folder className="w-3.5 h-3.5" />
+              <span>پوشه‌ها و ترجمه سرور</span>
+            </button>
             <button
               type="button"
               onClick={() => setMode('cinema')}
@@ -245,52 +263,7 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           </div>
 
-          {/* API Key / Provider Modal Button */}
-          {(() => {
-            const isNonGemini = activeProvider && activeProvider !== 'gemini';
-            const providerDef = activeProvider ? AI_PROVIDERS_CONFIG[activeProvider] : undefined;
-            const displayName = isNonGemini 
-              ? (providerDef?.name.split(' ')[0] || customProviderName || 'AI Provider')
-              : 'Gemini';
 
-            return (
-              <button
-                onClick={onOpenApiKeyModal}
-                className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-xl border transition-all active:scale-95 shrink-0 ${
-                  isNonGemini
-                    ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700/60 shadow-xs'
-                    : userApiKey
-                    ? 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border-indigo-300 dark:border-indigo-700/60 shadow-xs'
-                    : 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-700'
-                }`}
-                title={
-                  isNonGemini
-                    ? `Active Engine: ${providerDef?.name || customProviderName || 'BYOK'}`
-                    : userApiKey
-                    ? t.customKeyActive
-                    : t.defaultKeyActive
-                }
-              >
-                {isNonGemini ? (
-                  <Server className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                ) : (
-                  <Key className={`w-3.5 h-3.5 ${userApiKey ? 'text-indigo-600 dark:text-indigo-400' : 'text-amber-500'}`} />
-                )}
-                <span className="truncate max-w-[95px] sm:max-w-[125px]">
-                  {displayName}
-                </span>
-                <span
-                  className={`w-1.5 h-1.5 rounded-full ${
-                    isNonGemini
-                      ? 'bg-emerald-500 dark:bg-emerald-400 ring-2 ring-emerald-500/20'
-                      : userApiKey
-                      ? 'bg-indigo-500 dark:bg-indigo-400'
-                      : 'bg-slate-400 dark:bg-slate-500'
-                  }`}
-                />
-              </button>
-            );
-          })()}
 
           {/* Reset File Button */}
           {hasSubtitles && (

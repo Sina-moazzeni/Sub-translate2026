@@ -2,7 +2,7 @@
  * Types for Universal Subtitle & Game Localization Translator
  */
 
-export type AppMode = 'cinema' | 'game';
+export type AppMode = 'cinema' | 'game' | 'folders';
 
 export type TranslationMethod = 'batch' | 'stream';
 
@@ -126,7 +126,12 @@ export type ToneOption =
   | 'formal' 
   | 'humorous' 
   | 'educational' 
+  | 'documentary'
   | 'epic' 
+  | 'action'
+  | 'horror'
+  | 'poetic'
+  | 'animation'
   | 'custom';
 
 export interface ToneInfo {
@@ -309,6 +314,26 @@ export interface QueueFileItem {
   gameOriginalStructure?: any;
   resultBlob?: Blob;
   completedAt?: number;
+}
+
+export interface BatchHealthStatus {
+  batchIndex: number;
+  status: 'success' | 'failed' | 'retrying' | 'running' | 'pending';
+  cueRange?: string;
+  cuesCount?: number;
+  retryCount?: number;
+  maxRetries?: number;
+  error?: string;
+  durationMs?: number;
+}
+
+export interface FailedTranslationItem {
+  batchIndex: number;
+  cueIndex?: number;
+  cueId?: string | number;
+  originalText?: string;
+  error?: string;
+  timestamp?: string;
 }
 
 

@@ -15,7 +15,9 @@ import {
   CustomProviderConfig,
   ModeSessionState,
   QueueFileItem,
-  TokenUsageStats
+  TokenUsageStats,
+  BatchHealthStatus,
+  FailedTranslationItem
 } from './types';
 import { 
   createDefaultSession, 
@@ -75,12 +77,12 @@ import { UILanguage, TRANSLATIONS } from './lib/i18n';
 import { SUBGAME_LAB_LOGO } from './assets/logo';
 import { Send, Sparkles, Github } from 'lucide-react';
 import { Header } from './components/Header';
+import { FolderProjectManager } from './components/FolderProjectManager';
 import { FileUpload } from './components/FileUpload';
 import { BatchQueueManager } from './components/BatchQueueManager';
 import { ConfigPanel } from './components/ConfigPanel';
 import { TranslationProgress } from './components/TranslationProgress';
 import { SubtitleEditor } from './components/SubtitleEditor';
-import { VideoSubtitlePreview } from './components/VideoSubtitlePreview';
 import { ApiKeyModal } from './components/ApiKeyModal';
 import { BilingualModal } from './components/BilingualModal';
 import { HelpModal } from './components/HelpModal';
@@ -90,15 +92,16 @@ import { BatchReplaceOptions, BatchReplaceResult } from './components/BatchFindR
 export default function App() {
   const [darkMode, setDarkMode] = useState(true);
 
-  // Operational Mode: Cinema Subtitles vs Game Localization
+  // Operational Mode: Cinema Subtitles vs Game Localization vs Folders Database
   const [mode, setModeState] = useState<AppMode>(() => {
-    return (localStorage.getItem('gemini_app_mode') as AppMode) || 'cinema';
+    return (localStorage.getItem('gemini_app_mode') as AppMode) || 'folders';
   });
 
-  // Sessions dictionary for mode isolation (Cinema Mode vs Game Mode)
+  // Sessions dictionary for mode isolation (Cinema Mode vs Game Mode vs Folders)
   const sessionsRef = useRef<Record<AppMode, ModeSessionState>>({
     cinema: createDefaultSession('cinema'),
     game: createDefaultSession('game'),
+    folders: createDefaultSession('folders'),
   });
   const hasInitializedSessions = useRef<boolean>(false);
 
@@ -340,6 +343,8 @@ export default function App() {
   const [totalBatches, setTotalBatches] = useState<number>(0);
   const [translatedCount, setTranslatedCount] = useState<number>(0);
   const [retryInfo, setRetryInfo] = useState<{ batch: number; attempt: number; maxRetries: number } | null>(null);
+  const [batchHealthList, setBatchHealthList] = useState<BatchHealthStatus[]>([]);
+  const [failedItems, setFailedItems] = useState<FailedTranslationItem[]>([]);
 
   // Modals & Notifications
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -479,7 +484,9 @@ export default function App() {
     applySessionState(targetSession);
 
     showToast(
-      newMode === 'game'
+      newMode === 'folders'
+        ? (uiLang === 'en' ? 'Switched to Folders & Background Server Mode' : 'حالت پوشه‌ها و ترجمه پس‌زمینه سرور فعال شد')
+        : newMode === 'game'
         ? (uiLang === 'en' ? 'Switched to Game Localization Mode' : 'حالت بومی‌سازی بازی فعال شد')
         : (uiLang === 'en' ? 'Switched to Cinema Subtitle Mode' : 'حالت زیرنویس سینما فعال شد'),
       'info'
@@ -1314,6 +1321,20 @@ export default function App() {
     setCurrentBatch(0);
     setTranslatedCount(0);
 
+    const initialStreamHealth: BatchHealthStatus[] = Array.from({ length: totalBatchesCount }, (_, idx) => {
+      const start = idx * STREAM_CHUNK_SIZE + 1;
+      const end = Math.min(totalCount, (idx + 1) * STREAM_CHUNK_SIZE);
+      return {
+        batchIndex: idx + 1,
+        status: 'pending',
+        cueRange: `${start} - ${end}`,
+        cuesCount: Math.max(1, end - start + 1),
+        maxRetries: 1,
+      };
+    });
+    setBatchHealthList(initialStreamHealth);
+    setFailedItems([]);
+
     for (let b = 0; b < totalBatchesCount; b++) {
       if (isJobDead()) break;
 
@@ -1325,6 +1346,13 @@ export default function App() {
       if (isJobDead()) break;
 
       setCurrentBatch(b + 1);
+      setBatchHealthList((prev) =>
+        prev.map((item) =>
+          item.batchIndex === b + 1
+            ? { ...item, status: 'running' }
+            : item
+        )
+      );
       const startIndex = b * STREAM_CHUNK_SIZE;
       const batchSlice = items.slice(startIndex, startIndex + STREAM_CHUNK_SIZE);
 
@@ -1478,6 +1506,16 @@ export default function App() {
             }
           }
         }
+
+        if (!clientGone && !isJobDead()) {
+          setBatchHealthList((prev) =>
+            prev.map((item) =>
+              item.batchIndex === b + 1
+                ? { ...item, status: 'success' }
+                : item
+            )
+          );
+        }
       } catch (streamErr: any) {
         // FIX (Cancellation): an abort from the Cancel button is not an error — exit quietly.
         // Previously an abort/network error was toasted and the loop CONTINUED to the next batch.
@@ -1485,7 +1523,26 @@ export default function App() {
           clientGone = true;
         } else {
           console.error('Live streaming network/parse error:', streamErr);
-          showToast(streamErr?.message || 'Error in live streaming translation', 'error');
+          const errMsg = streamErr?.message || 'Error in live streaming translation';
+          showToast(errMsg, 'error');
+          setBatchHealthList((prev) =>
+            prev.map((item) =>
+              item.batchIndex === b + 1
+                ? { ...item, status: 'failed', error: errMsg }
+                : item
+            )
+          );
+          setFailedItems((prev) => [
+            ...prev,
+            ...batchSlice.map((item, idx) => ({
+              batchIndex: b + 1,
+              cueIndex: startIndex + idx + 1,
+              cueId: item.id,
+              originalText: item.originalText,
+              error: errMsg,
+              timestamp: new Date().toISOString(),
+            })),
+          ]);
         }
       } finally {
         // FIX: release the abort controller slot so a fresh job registers its own
@@ -1637,6 +1694,20 @@ export default function App() {
     setCurrentBatch(0);
     setTranslatedCount(0);
 
+    const initialHealth: BatchHealthStatus[] = Array.from({ length: totalBatchesCount }, (_, idx) => {
+      const start = idx * BATCH_SIZE + 1;
+      const end = Math.min(totalCount, (idx + 1) * BATCH_SIZE);
+      return {
+        batchIndex: idx + 1,
+        status: 'pending',
+        cueRange: `${start} - ${end}`,
+        cuesCount: Math.max(1, end - start + 1),
+        maxRetries: 3,
+      };
+    });
+    setBatchHealthList(initialHealth);
+    setFailedItems([]);
+
     const isRTL = RTL_LANGUAGES.includes(targetLanguage);
 
     for (let b = 0; b < totalBatchesCount; b++) {
@@ -1651,6 +1722,13 @@ export default function App() {
       if (cancelTranslationRef.current || activeJobIdRef.current !== currentJobId) break;
 
       setCurrentBatch(b + 1);
+      setBatchHealthList((prev) =>
+        prev.map((item) =>
+          item.batchIndex === b + 1
+            ? { ...item, status: 'running' }
+            : item
+        )
+      );
 
       const startIndex = b * BATCH_SIZE;
       const batchSlice = currentItems.slice(startIndex, startIndex + BATCH_SIZE);
@@ -1694,12 +1772,20 @@ export default function App() {
       let attempt = 0;
       let isInstantKeyFailover = false;
       let keyFailoversDone = 0;
+      let lastBatchError = '';
       const MAX_RETRIES = 3; // Consolidated unified retries (Requirements 6, 7, 8)
 
       while (!success && attempt < MAX_RETRIES && !cancelTranslationRef.current && activeJobIdRef.current === currentJobId) {
         attempt++;
         if (attempt > 1 && !isInstantKeyFailover) {
           setRetryInfo({ batch: b + 1, attempt, maxRetries: MAX_RETRIES });
+          setBatchHealthList((prev) =>
+            prev.map((item) =>
+              item.batchIndex === b + 1
+                ? { ...item, status: 'retrying', retryCount: attempt, maxRetries: MAX_RETRIES }
+                : item
+            )
+          );
           // Exponential backoff with jitter only for actual retry of same key pool
           const baseDelay = Math.min(Math.pow(2, attempt - 1) * 2000, 16000);
           const jitter = Math.floor(Math.random() * 1000);
@@ -1907,14 +1993,22 @@ export default function App() {
             setTranslatedCount((prev) => prev + batchSlice.length);
             success = true;
             setRetryInfo(null);
+            setBatchHealthList((prev) =>
+              prev.map((item) =>
+                item.batchIndex === b + 1
+                  ? { ...item, status: 'success', retryCount: attempt }
+                  : item
+              )
+            );
           }
         } catch (err: any) {
           if (err?.name === 'AbortError' || cancelTranslationRef.current || activeJobIdRef.current !== currentJobId) {
             break;
           }
           console.error(`Batch ${b + 1} attempt ${attempt} failed:`, err);
+          const errMsg = err instanceof Error ? err.message : `Batch ${b + 1} failed after ${MAX_RETRIES} attempts.`;
+          lastBatchError = errMsg;
           if (attempt >= MAX_RETRIES) {
-            const errMsg = err instanceof Error ? err.message : `Batch ${b + 1} failed after ${MAX_RETRIES} attempts.`;
             showToast(errMsg, 'error');
           }
         } finally {
@@ -1922,6 +2016,29 @@ export default function App() {
             activeAbortControllerRef.current = null;
           }
         }
+      }
+
+      // If batch failed after all retries, mark in health list and save failed items
+      if (!success && !cancelTranslationRef.current && activeJobIdRef.current === currentJobId) {
+        const batchErrMsg = lastBatchError || `Batch ${b + 1} failed after ${MAX_RETRIES} attempts.`;
+        setBatchHealthList((prev) =>
+          prev.map((item) =>
+            item.batchIndex === b + 1
+              ? { ...item, status: 'failed', error: batchErrMsg, retryCount: attempt }
+              : item
+          )
+        );
+        setFailedItems((prev) => [
+          ...prev,
+          ...batchSlice.map((item, idx) => ({
+            batchIndex: b + 1,
+            cueIndex: startIndex + idx + 1,
+            cueId: item.id,
+            originalText: item.originalText,
+            error: batchErrMsg,
+            timestamp: new Date().toISOString(),
+          })),
+        ]);
       }
 
       // Adaptive pacing delay between batches to protect against RPM/TPM rate limits
@@ -2267,7 +2384,29 @@ export default function App() {
     sessionsRef.current[mode] = defaultSession;
     await clearSessionInDb(mode);
     applySessionState(defaultSession);
+    setBatchHealthList([]);
+    setFailedItems([]);
     showToast(t.allDataReset, 'info');
+  };
+
+  // Open Project from Server Folders Database into Cinema Editor
+  const handleOpenProjectInEditor = (project: {
+    id: string;
+    name: string;
+    folderName?: string;
+    items: SubtitleItem[];
+    format: SubtitleFormat;
+    rawHeader?: string;
+  }) => {
+    setFileName(project.name);
+    setFileSize(0);
+    setItems(project.items);
+    setSourceFormat(project.format);
+    setTargetFormat(project.format);
+    setRawHeader(project.rawHeader);
+    setMode('cinema');
+    const folderInfo = project.folderName ? ` (از پوشه: ${project.folderName})` : '';
+    showToast(`زیرنویس "${project.name}"${folderInfo} در ادیتور سینمایی بارگذاری شد.`, 'success');
   };
 
   return (
@@ -2303,9 +2442,16 @@ export default function App() {
 
       {/* Main Container */}
       <main className="max-w-7xl mx-auto px-4 lg:px-8 py-6 flex flex-col gap-6">
-        
-        {/* Upload Zone with Multi-file Selection */}
-        <FileUpload
+        {mode === 'folders' ? (
+          <FolderProjectManager
+            uiLang={uiLang}
+            onOpenProjectInEditor={handleOpenProjectInEditor}
+            onShowToast={showToast}
+          />
+        ) : (
+          <>
+            {/* Upload Zone with Multi-file Selection */}
+            <FileUpload
           mode={mode}
           onFileSelect={(buffer, name, size, enc) => processBufferData(buffer, name, size, mode, enc)}
           onFilesSelect={(files, enc) => handleFilesSelect(files, enc)}
@@ -2420,23 +2566,13 @@ export default function App() {
             tokenUsage={tokenUsage}
             activeKeyIndex={activeKeyIndex}
             totalKeysCount={getProviderKeys(activeAiProvider).length}
+            batchHealth={batchHealthList}
+            failedItems={failedItems}
+            fileName={fileName}
           />
         )}
 
-        {/* Video Player, AI Extraction & Subtitle Style Customizer (Cinema Mode Only) */}
-        {mode === 'cinema' && (
-          <VideoSubtitlePreview
-            items={items}
-            onUpdateItems={(newItems) => setItems(newItems)}
-            uiLang={uiLang}
-            userApiKey={userApiKey}
-            onShowToast={showToast}
-            bilingualConfig={bilingualConfig}
-            setBilingualConfig={handleUpdateBilingualConfig}
-            onOpenBilingualModal={() => setIsBilingualModalOpen(true)}
-            targetLanguage={targetLanguage}
-          />
-        )}
+
 
         {/* Subtitle / Game String Editor & Live Preview */}
         {items.length > 0 && (
@@ -2458,6 +2594,8 @@ export default function App() {
             onOpenBilingualModal={() => setIsBilingualModalOpen(true)}
             bilingualConfig={bilingualConfig}
           />
+        )}
+          </>
         )}
 
       </main>

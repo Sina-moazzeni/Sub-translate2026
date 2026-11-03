@@ -19,6 +19,51 @@ import {
   extractJsonFromText,
   classifyCustomProviderError
 } from './src/lib/customProviderService';
+import JSZip from 'jszip';
+import { parseSubtitleFile, fixRTLPunctuation } from './src/lib/subtitleParser';
+import {
+  getAllFolders,
+  getFolderById,
+  createFolder,
+  updateFolder,
+  deleteFolder,
+  getProjectsByFolder,
+  getAllProjects,
+  getProjectById,
+  createProject,
+  updateProject,
+  deleteProject,
+  getServerKeys,
+  setServerKeys,
+  addServerKeys,
+  updateSingleServerKey,
+  deleteSingleServerKey,
+  getServerKeysWithDetails,
+  getServerConfig,
+  updateServerConfig,
+  createBackupJson,
+  restoreBackupJson,
+  getDatabaseFilePath,
+  getKeyExhaustionStatus,
+  batchReplaceInFolder,
+  resetKeyCooldown,
+  resetAllKeyCooldowns,
+  resetKeyStats,
+  ServerSubtitleProject
+} from './src/server/database';
+import {
+  startBackgroundWorker,
+  stopBackgroundWorker,
+  getWorkerStatus,
+  queueFolderForTranslation,
+  pauseFolderTranslation,
+  queueSingleProject,
+  pauseSingleProject,
+  resumeSingleProject,
+  restartProject,
+  testServerKey,
+  resetWorkerExhaustionBackoff
+} from './src/server/backgroundWorker';
 
 dotenv.config();
 
@@ -28,31 +73,25 @@ const _dirname = typeof __dirname !== 'undefined'
   : process.cwd();
 
 // Runtime status of static frontend hosting, surfaced via /api/health for remote diagnosis.
-// FIX (WHITE-SCREEN INCIDENT, Render 2026-09-14): when the platform build never ran
-// (dist/ missing) the old code silently served the REPO ROOT, which returned the raw
-// dev index.html (references /src/main.tsx -> blank white page) AND exposed the entire
-// source tree (server.ts, package-lock.json, render.yaml...) via express.static.
 let PROD_STATIC_STATE: 'build' | 'missing' | 'dev' = 'dev';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-// ─── FIX (B1): protect the server's own API key & expensive endpoints ─────────────
-// 1) CORS lockdown: when ALLOWED_ORIGIN is set (e.g. "https://myapp.example.com"), only that
-//    origin is echoed back instead of the wildcard that let any website burn the server quota.
-const ALLOWED_ORIGIN = (process.env.ALLOWED_ORIGIN || '').trim();
+// Dynamic CORS configuration (default: open to all hosts/origins '*')
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (ALLOWED_ORIGIN && origin) {
-    const allowedList = ALLOWED_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean);
-    if (allowedList.includes(origin)) {
+  const config = getServerConfig();
+  const allowed = (config.allowedOrigin || process.env.ALLOWED_ORIGIN || '*').trim();
+
+  if (!allowed || allowed === '*' || !origin) {
+    res.header('Access-Control-Allow-Origin', '*');
+  } else {
+    const allowedList = allowed.split(',').map((o) => o.trim()).filter(Boolean);
+    if (allowedList.includes('*') || allowedList.includes(origin)) {
       res.header('Access-Control-Allow-Origin', origin);
       res.header('Vary', 'Origin');
     }
-    // Non-allowed origins get no CORS headers → browsers block the response
-  } else {
-    // Local development / unconfigured deployments keep the previous open behavior
-    res.header('Access-Control-Allow-Origin', '*');
   }
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-gemini-api-key, x-gemini-api-keys');
@@ -122,13 +161,17 @@ function getGenAIClient(customApiKey?: string): GoogleGenAI {
   if (!apiKey) {
     throw new Error('کلید API جمینای تنظیم نشده است. لطفا کلید خود را در منوی "کلید API" بالای صفحه وارد کنید.');
   }
+  const config = getServerConfig();
+  const rawBaseUrl = config.geminiBaseUrl?.trim() || process.env.GEMINI_BASE_URL?.trim();
+  let normalizedBaseUrl: string | undefined = undefined;
+  if (rawBaseUrl && rawBaseUrl !== 'https://generativelanguage.googleapis.com') {
+    normalizedBaseUrl = rawBaseUrl.replace(/\/+$/, '');
+  }
+
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
-      // FIX: GEMINI_BASE_URL allows pointing the SDK at a mock/self-hosted upstream —
-      // essential for deterministic integration tests of failover/quota/stream behavior
-      // (undefined in production = default Google endpoint, zero behavior change).
-      baseUrl: process.env.GEMINI_BASE_URL?.trim() || undefined,
+      baseUrl: normalizedBaseUrl,
       headers: {
         'User-Agent': 'aistudio-build',
       },
@@ -141,9 +184,14 @@ const TONE_PROMPTS: Record<string, string> = {
   cinematic: 'سینمایی و دراماتیک (لحن شیوا، دراماتیک و مناسب دوبله و فیلم‌های سینمایی فاخر)',
   conversational: 'عامیانه و گفتاری (زبان روزمره، صمیمی، روانی مکالمات خیابانی، اصطلاحات روز و ولاگ)',
   formal: 'رسمی، کتابی و دقیق (وفاداری کامل به واژگان با ادبیات معیار)',
-  humorous: 'طنز و شوخ‌طبعانه (استفاده طبیعی و بدون سانسور از جوک‌ها، شوخی‌های بزرگسالانه، کنایه‌ها، متلک‌ها و اصطلاحات طنز متناسب با زبان و فرهنگ مقصد)',
-  educational: 'آموزشی و علمی (رعایت ترمینولوژی تخصصی، صراحت و دقت مستندهای علمی)',
+  documentary: 'مستند علمی و پژوهشی (ویژه مستندهای علمی، تاریخی و افشای کیهانی با اصطلاحات دقیق تخصصی و لحن متین پژوهشی)',
   epic: 'حماسی و تاریخی (مناسب بازی‌های نقش‌آفرینی RPG، بازی‌های ویدیویی، محتوای تاریخی، افسانه‌ای و فانتزی با لحن حماسی و اساطیری فاخر)',
+  action: 'اکشن و مهیج (جملات کوتاه، پرانرژی، کوبنده و ضربتی مناسب فیلم‌های اکشن، هیجانی و پلیسی)',
+  humorous: 'طنز و شوخ‌طبعانه (استفاده طبیعی و بدون سانسور از جوک‌ها، شوخی‌ها، کنایه‌ها و متلک‌های طنز متناسب با زبان و فرهنگ مقصد)',
+  horror: 'ترسناک و معمایی (فضای مرموز، رازآلود، تعلیق‌دار و دلهره‌آور مناسب فیلم‌های وحشت و ماورایی)',
+  educational: 'آموزشی و درسی (رعایت ترمینولوژی تخصصی، صراحت، شفافیت و دقت مفاهیم علمی)',
+  poetic: 'ادبی و شاعرانه (واژه‌گزینی فاخر، آرایه‌های کلامی و ادبیات شکوهمند کلاسیک)',
+  animation: 'کودکانه و انیمیشن (زبان شیرین، ساده، کودکانه و پرنشاط)',
   custom: 'دستورالعمل و لحن اختصاصی کاربر (پیروی دقیق از قوانین سفارشی و اصطلاحات اختصاصی کاربر)',
 };
 
@@ -2167,6 +2215,685 @@ app.post('/api/custom-provider/test', async (req, res) => {
 });
 
 
+// ─── Subtitle Folder & Background Translation Endpoints ───────────────────────
+
+function secondsToVTTTime(seconds: number): string {
+  const s = Math.max(0, isNaN(seconds) ? 0 : seconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  const ms = Math.floor((s % 1) * 1000);
+  const pad = (n: number, size = 2) => String(n).padStart(size, '0');
+  return `${pad(h)}:${pad(m)}:${pad(sec)}.${pad(ms, 3)}`;
+}
+
+function secondsToSRTTime(seconds: number): string {
+  const s = Math.max(0, isNaN(seconds) ? 0 : seconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  const ms = Math.floor((s % 1) * 1000);
+  const pad = (n: number, size = 2) => String(n).padStart(size, '0');
+  return `${pad(h)}:${pad(m)}:${pad(sec)},${pad(ms, 3)}`;
+}
+
+function exportServerProjectToVTT(project: ServerSubtitleProject): string {
+  const header = project.rawHeader && project.rawHeader.startsWith('WEBVTT') ? project.rawHeader : 'WEBVTT';
+  const isRTL = ['fa', 'ar', 'he', 'ur'].includes(project.targetLanguage || 'fa');
+
+  const cues = project.items.map((item, idx) => {
+    let text = item.translatedText.trim() || item.originalText.trim();
+    if (isRTL && item.translatedText.trim()) {
+      text = fixRTLPunctuation(text);
+    }
+    const start = secondsToVTTTime(item.startSeconds);
+    const end = secondsToVTTTime(item.endSeconds);
+    const settings = item.styleTags ? ` ${item.styleTags}` : '';
+    const id = item.cueId || String(item.id || idx + 1);
+    return `${id}\n${start} --> ${end}${settings}\n${text}\n`;
+  }).join('\n');
+
+  return `${header}\n\n${cues}`;
+}
+
+function exportServerProjectToSRT(project: ServerSubtitleProject): string {
+  const isRTL = ['fa', 'ar', 'he', 'ur'].includes(project.targetLanguage || 'fa');
+  return project.items.map((item, idx) => {
+    let text = item.translatedText.trim() || item.originalText.trim();
+    if (isRTL && item.translatedText.trim()) {
+      text = fixRTLPunctuation(text);
+    }
+    const start = secondsToSRTTime(item.startSeconds);
+    const end = secondsToSRTTime(item.endSeconds);
+    const id = item.cueId || String(item.id || idx + 1);
+    return `${id}\n${start} --> ${end}\n${text}\n`;
+  }).join('\n');
+}
+
+// 1. Get all folders with stats
+app.get('/api/folders', (req, res) => {
+  try {
+    const folders = getAllFolders();
+    return res.json({ success: true, folders });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to list folders' });
+  }
+});
+
+// 2. Create new folder (with tone support)
+app.post('/api/folders', (req, res) => {
+  try {
+    const { name, description, tone } = req.body || {};
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ success: false, error: 'نام پوشه الزامی است.' });
+    }
+    const folder = createFolder(name, description, tone);
+    return res.json({ success: true, folder });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to create folder' });
+  }
+});
+
+// 3. Update folder name, description, or tone
+app.put('/api/folders/:id', (req, res) => {
+  try {
+    const { name, description, tone } = req.body || {};
+    const updated = updateFolder(req.params.id, { name, description, tone });
+    if (!updated) return res.status(404).json({ success: false, error: 'پوشه یافت نشد.' });
+    return res.json({ success: true, folder: updated });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to update folder' });
+  }
+});
+
+// 4. Delete folder and all its contents
+app.delete('/api/folders/:id', (req, res) => {
+  try {
+    const deleted = deleteFolder(req.params.id);
+    if (!deleted) return res.status(404).json({ success: false, error: 'پوشه یافت نشد.' });
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to delete folder' });
+  }
+});
+
+// 5. Get all subtitle projects in a folder
+app.get('/api/folders/:folderId/projects', (req, res) => {
+  try {
+    const projects = getProjectsByFolder(req.params.folderId);
+    return res.json({ success: true, projects });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to fetch folder projects' });
+  }
+});
+
+// 6. Upload one or multiple subtitle files into a folder (inherits folder tone automatically)
+app.post('/api/folders/:folderId/upload', (req, res) => {
+  try {
+    const { folderId } = req.params;
+    const folder = getFolderById(folderId);
+    if (!folder) return res.status(404).json({ success: false, error: 'پوشه مورد نظر یافت نشد.' });
+
+    const { files, targetLanguage = 'fa', tone, customPrompt, autoQueue = true } = req.body || {};
+    const effectiveTone = tone || folder.tone || 'cinematic';
+
+    if (!files || !Array.isArray(files) || files.length === 0) {
+      return res.status(400).json({ success: false, error: 'هیچ فایلی برای آپلود ارسال نشده است.' });
+    }
+
+    const createdProjects: ServerSubtitleProject[] = [];
+
+    for (const file of files) {
+      let items = file.items;
+      let format = file.format || 'srt';
+      let rawHeader = file.rawHeader;
+
+      // If raw text/content is provided, parse it on the server
+      if ((!items || items.length === 0) && file.content) {
+        const parsed = parseSubtitleFile(file.content, file.name);
+        items = parsed.items;
+        format = parsed.format;
+        rawHeader = parsed.rawHeader;
+      }
+
+      if (!items || items.length === 0) continue;
+
+      const project = createProject({
+        folderId,
+        name: file.name,
+        format: format as any,
+        rawHeader,
+        sourceLanguage: file.sourceLanguage || 'auto',
+        targetLanguage,
+        tone: effectiveTone,
+        customPrompt,
+        items,
+        autoQueue,
+      });
+
+      createdProjects.push(project);
+    }
+
+    return res.json({
+      success: true,
+      count: createdProjects.length,
+      projects: createdProjects,
+    });
+  } catch (err: any) {
+    console.error('[Upload to folder error]:', err);
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to upload subtitles to folder' });
+  }
+});
+
+// 7. Start/queue background translation for all pending files in a folder
+app.post('/api/folders/:folderId/start', (req, res) => {
+  try {
+    const queuedCount = queueFolderForTranslation(req.params.folderId);
+    return res.json({ success: true, queuedCount, message: `تعداد ${queuedCount} فایل به صف ترجمه پس‌زمینه اضافه شد.` });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to start folder translation' });
+  }
+});
+
+// 8. Pause background translation for a folder
+app.post('/api/folders/:folderId/pause', (req, res) => {
+  try {
+    const pausedCount = pauseFolderTranslation(req.params.folderId);
+    return res.json({ success: true, pausedCount, message: `ترجمه پس‌زمینه ${pausedCount} فایل متوقف شد.` });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to pause folder translation' });
+  }
+});
+
+// 9. Batch VTT Export for entire folder (ZIP)
+app.get('/api/folders/:folderId/export/vtt', async (req, res) => {
+  try {
+    const folder = getFolderById(req.params.folderId);
+    if (!folder) return res.status(404).json({ error: 'Folder not found' });
+
+    const projects = getProjectsByFolder(req.params.folderId);
+    if (projects.length === 0) {
+      return res.status(400).json({ error: 'هیچ زیرنویسی در این پوشه وجود ندارد.' });
+    }
+
+    const zip = new JSZip();
+    for (const project of projects) {
+      const vttContent = exportServerProjectToVTT(project);
+      const baseName = project.name.substring(0, project.name.lastIndexOf('.')) || project.name;
+      const targetLang = project.targetLanguage || 'fa';
+      const outName = `${baseName}_${targetLang}.vtt`;
+      zip.file(outName, vttContent);
+    }
+
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    const safeFolderName = encodeURIComponent(folder.name.replace(/[^a-zA-Z0-9\u0600-\u06FF_-]/g, '_'));
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeFolderName}_VTT.zip"; filename*=UTF-8''${safeFolderName}_VTT.zip`);
+    return res.send(zipBuffer);
+  } catch (err: any) {
+    console.error('[Export VTT ZIP Error]:', err);
+    return res.status(500).json({ error: 'Failed to generate VTT ZIP archive' });
+  }
+});
+
+// 9b. Batch SRT Export for entire folder (ZIP)
+app.get('/api/folders/:folderId/export/srt', async (req, res) => {
+  try {
+    const folder = getFolderById(req.params.folderId);
+    if (!folder) return res.status(404).json({ error: 'Folder not found' });
+
+    const projects = getProjectsByFolder(req.params.folderId);
+    if (projects.length === 0) {
+      return res.status(400).json({ error: 'هیچ زیرنویسی در این پوشه وجود ندارد.' });
+    }
+
+    const zip = new JSZip();
+    for (const project of projects) {
+      const srtContent = exportServerProjectToSRT(project);
+      const baseName = project.name.substring(0, project.name.lastIndexOf('.')) || project.name;
+      const targetLang = project.targetLanguage || 'fa';
+      const outName = `${baseName}_${targetLang}.srt`;
+      zip.file(outName, srtContent);
+    }
+
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    const safeFolderName = encodeURIComponent(folder.name.replace(/[^a-zA-Z0-9\u0600-\u06FF_-]/g, '_'));
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeFolderName}_SRT.zip"; filename*=UTF-8''${safeFolderName}_SRT.zip`);
+    return res.send(zipBuffer);
+  } catch (err: any) {
+    console.error('[Export SRT ZIP Error]:', err);
+    return res.status(500).json({ error: 'Failed to generate SRT ZIP archive' });
+  }
+});
+
+// 9c. Global Find & Replace in all subtitles of a specific folder
+app.post('/api/folders/:folderId/batch-replace', (req, res) => {
+  try {
+    const { folderId } = req.params;
+    const folder = getFolderById(folderId);
+    if (!folder) return res.status(404).json({ success: false, error: 'پوشه یافت نشد.' });
+
+    const { findText, replaceText, scope = 'translated', matchCase = false, wholeWord = false, useRegex = false } = req.body || {};
+    if (!findText || typeof findText !== 'string' || !findText.trim()) {
+      return res.status(400).json({ success: false, error: 'متن جستجو الزامی است.' });
+    }
+
+    const result = batchReplaceInFolder(folderId, {
+      findText: findText.trim(),
+      replaceText: typeof replaceText === 'string' ? replaceText : '',
+      scope,
+      matchCase: Boolean(matchCase),
+      wholeWord: Boolean(wholeWord),
+      useRegex: Boolean(useRegex),
+    });
+
+    return res.json({
+      success: true,
+      ...result,
+      message: `تعداد ${result.totalReplacements} مورد با موفقیت در ${result.affectedFilesCount} فیلم پوشه «${folder.name}» جایگزین و ذخیره شد.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to replace in folder' });
+  }
+});
+
+// 10. All Projects across all folders
+app.get('/api/projects', (req, res) => {
+  try {
+    const projects = getAllProjects();
+    const folders = getAllFolders();
+    const folderMap = new Map(folders.map((f) => [f.id, f.name]));
+    const enriched = projects.map((p) => ({
+      ...p,
+      folderName: folderMap.get(p.folderId) || 'پوشه نامشخص',
+    }));
+    return res.json({ success: true, projects: enriched });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 10b. Single Project Details
+app.get('/api/projects/:id', (req, res) => {
+  try {
+    const project = getProjectById(req.params.id);
+    if (!project) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    const folder = getFolderById(project.folderId);
+    return res.json({
+      success: true,
+      project: {
+        ...project,
+        folderName: folder?.name || 'پوشه نامشخص',
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 10c. Move Project to another folder
+app.put('/api/projects/:id/move', (req, res) => {
+  try {
+    const { targetFolderId } = req.body || {};
+    if (!targetFolderId) {
+      return res.status(400).json({ success: false, error: 'شناسه پوشه مقصد الزامی است.' });
+    }
+    const targetFolder = getFolderById(targetFolderId);
+    if (!targetFolder) {
+      return res.status(404).json({ success: false, error: 'پوشه مقصد یافت نشد.' });
+    }
+    const updated = updateProject(req.params.id, { folderId: targetFolderId });
+    if (!updated) {
+      return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    }
+    return res.json({
+      success: true,
+      project: updated,
+      message: `فایل با موفقیت به پوشه "${targetFolder.name}" انتقال یافت.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 11. Update Project (e.g. edited items, tone)
+app.put('/api/projects/:id', (req, res) => {
+  try {
+    const updated = updateProject(req.params.id, req.body);
+    if (!updated) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    return res.json({ success: true, project: updated });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 12. Delete single project
+app.delete('/api/projects/:id', (req, res) => {
+  try {
+    const deleted = deleteProject(req.params.id);
+    if (!deleted) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 13. Start single project background translation
+app.post('/api/projects/:id/start', (req, res) => {
+  try {
+    const success = queueSingleProject(req.params.id);
+    if (!success) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    return res.json({ success: true, message: 'فایل در صف ترجمه پس‌زمینه سرور قرار گرفت.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 14. Pause single project background translation
+app.post('/api/projects/:id/pause', (req, res) => {
+  try {
+    const success = pauseSingleProject(req.params.id);
+    if (!success) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    return res.json({ success: true, message: 'ترجمه پس‌زمینه متوقف شد.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 14b. Resume single project background translation
+app.post('/api/projects/:id/resume', (req, res) => {
+  try {
+    const success = resumeSingleProject(req.params.id);
+    if (!success) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    return res.json({ success: true, message: 'ترجمه پروژه از آخرین سطر باقی‌مانده ادامه می‌یابد.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 14c. Restart project translation (full restart or incomplete only)
+app.post('/api/projects/:id/restart', (req, res) => {
+  try {
+    const { onlyIncomplete = false } = req.body || {};
+    const success = restartProject(req.params.id, Boolean(onlyIncomplete));
+    if (!success) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    const msg = onlyIncomplete 
+      ? 'سطرهای ناقص یا ترجمه‌نشده مجدداً در صف ترجمه قرار گرفتند.' 
+      : 'کل زیرنویس بازنشانی و ترجمه از ابتدا آغاز شد.';
+    return res.json({ success: true, message: msg });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 14d. Folder resume
+app.post('/api/folders/:folderId/resume', (req, res) => {
+  try {
+    const count = queueFolderForTranslation(req.params.folderId);
+    return res.json({ success: true, count, message: `${count} پروژه برای ادامه ترجمه به صف اضافه شدند.` });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 15. Single project VTT download
+app.get('/api/projects/:id/export/vtt', (req, res) => {
+  try {
+    const project = getProjectById(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+
+    const vttContent = exportServerProjectToVTT(project);
+    const baseName = project.name.substring(0, project.name.lastIndexOf('.')) || project.name;
+    const fileName = `${baseName}_${project.targetLanguage || 'fa'}.vtt`;
+    res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
+    return res.send(vttContent);
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to export VTT' });
+  }
+});
+
+// 15b. Single project SRT download
+app.get('/api/projects/:id/export/srt', (req, res) => {
+  try {
+    const project = getProjectById(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+
+    const srtContent = exportServerProjectToSRT(project);
+    const baseName = project.name.substring(0, project.name.lastIndexOf('.')) || project.name;
+    const fileName = `${baseName}_${project.targetLanguage || 'fa'}.srt`;
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
+    return res.send(srtContent);
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to export SRT' });
+  }
+});
+
+// 16. Server Config: Get & Update (ALLOWED_ORIGIN, GEMINI_BASE_URL, maxConcurrentProjects)
+app.get('/api/server/config', (req, res) => {
+  try {
+    const config = getServerConfig();
+    return res.json({ success: true, config });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+app.post('/api/server/config', (req, res) => {
+  try {
+    const { allowedOrigin, geminiBaseUrl, maxConcurrentProjects } = req.body || {};
+    const updated = updateServerConfig({ allowedOrigin, geminiBaseUrl, maxConcurrentProjects });
+    return res.json({ success: true, config: updated, message: 'تنظیمات سرور با موفقیت به‌روزرسانی شد.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 17. Get server key rotation pool with full details
+app.get('/api/server/keys', (req, res) => {
+  try {
+    const allKeys = getServerKeys();
+    const details = getServerKeysWithDetails();
+    const masked = details.map((d) => d.maskedKey);
+    return res.json({
+      success: true,
+      count: allKeys.length,
+      keys: masked,
+      details,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 18. Add / update server keys (batch)
+app.post('/api/server/keys', (req, res) => {
+  try {
+    const { keys, mode = 'append' } = req.body || {};
+    if (!Array.isArray(keys)) {
+      return res.status(400).json({ success: false, error: 'Keys array required' });
+    }
+    const updatedKeys = mode === 'replace' ? setServerKeys(keys) : addServerKeys(keys);
+    resetWorkerExhaustionBackoff();
+    return res.json({
+      success: true,
+      count: updatedKeys.length,
+      message: `تعداد ${updatedKeys.length} کلید API در استخر سرور فعال شد.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 18b. Edit single server key by index
+app.put('/api/server/keys/:index', (req, res) => {
+  try {
+    const index = parseInt(req.params.index, 10);
+    const { key } = req.body || {};
+    if (!key || typeof key !== 'string' || !key.trim()) {
+      return res.status(400).json({ success: false, error: 'کلید معتبر الزامی است.' });
+    }
+    const updatedKeys = updateSingleServerKey(index, key.trim());
+    resetWorkerExhaustionBackoff();
+    return res.json({
+      success: true,
+      count: updatedKeys.length,
+      message: `کلید #${index + 1} با موفقیت ویرایش شد.`,
+      details: getServerKeysWithDetails(),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 18c. Delete single server key by index
+app.delete('/api/server/keys/:index', (req, res) => {
+  try {
+    const index = parseInt(req.params.index, 10);
+    const updatedKeys = deleteSingleServerKey(index);
+    return res.json({
+      success: true,
+      count: updatedKeys.length,
+      message: `کلید مورد نظر با موفقیت از استخر سرور حذف شد.`,
+      details: getServerKeysWithDetails(),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 18. Background worker status check
+app.get('/api/background/status', (req, res) => {
+  try {
+    const status = getWorkerStatus();
+    return res.json({ success: true, status });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 19. Server-Side Key Verification (Completely independent of user's browser)
+app.post('/api/server/keys/test', async (req, res) => {
+  try {
+    const { key } = req.body || {};
+    const keyToTest = key?.trim() || getServerKeys()[0];
+    if (!keyToTest) {
+      return res.status(400).json({ success: false, message: 'هیچ کلیدی برای تست ارسال نشده است.' });
+    }
+    const result = await testServerKey(keyToTest);
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Server test failed' });
+  }
+});
+
+// 20. Key exhaustion status
+app.get('/api/server/keys/status', (req, res) => {
+  try {
+    const keyStatuses = getKeyExhaustionStatus();
+    return res.json({ success: true, keys: keyStatuses });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 20b. Reset all key cooldowns (instantly reactivate all keys)
+app.post('/api/server/keys/reset-cooldowns', (req, res) => {
+  try {
+    resetAllKeyCooldowns();
+    resetWorkerExhaustionBackoff();
+    return res.json({
+      success: true,
+      message: 'تمام کلیدها از وضعیت وقفه خارج شده و مجدداً فعال شدند.',
+      details: getServerKeysWithDetails(),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 20c. Reset single key cooldown by index
+app.post('/api/server/keys/:index/reset-cooldown', (req, res) => {
+  try {
+    const index = parseInt(req.params.index, 10);
+    const allKeys = getServerKeys();
+    if (index >= 0 && index < allKeys.length) {
+      resetKeyCooldown(allKeys[index]);
+      resetWorkerExhaustionBackoff();
+      return res.json({
+        success: true,
+        message: `وقفه کلید #${index + 1} بازنشانی شد و کلید فعال گردید.`,
+        details: getServerKeysWithDetails(),
+      });
+    }
+    return res.status(404).json({ success: false, error: 'کلید یافت نشد.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 20d. Reset all key token stats
+app.delete('/api/server/keys/stats', (req, res) => {
+  try {
+    resetKeyStats();
+    return res.json({
+      success: true,
+      message: 'آمار مصرف توکن کلیدها با موفقیت صفر شد.',
+      details: getServerKeysWithDetails(),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 21. Full Database Backup Download
+app.get('/api/backup', (req, res) => {
+  try {
+    const backupJson = createBackupJson();
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const filename = `SubGameLab_Backup_${dateStr}.json`;
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.send(backupJson);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: 'Failed to generate database backup' });
+  }
+});
+
+// 22. Restore Database from Backup
+app.post('/api/backup/restore', (req, res) => {
+  try {
+    const { backupContent } = req.body || {};
+    if (!backupContent || typeof backupContent !== 'string') {
+      return res.status(400).json({ success: false, error: 'محتوای فایل پشتیبان ارسال نشده است.' });
+    }
+    const result = restoreBackupJson(backupContent);
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to restore backup' });
+  }
+});
+
+// 23. Server and Storage Information (for VPS & local disk clarity)
+app.get('/api/server/info', (req, res) => {
+  try {
+    return res.json({
+      success: true,
+      model: 'Gemini 3.5 Flash Lite',
+      modelId: 'gemini-3.1-flash-lite',
+      databasePath: getDatabaseFilePath(),
+      vpsReady: true,
+      port: PORT,
+      host: '0.0.0.0',
+      description: 'فایل‌های زیرنویس و دیتابیس مستقیماً روی دیسک سرور در مسیر data/subtitles_db.json ذخیره می‌شوند.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
 // Health check route
 app.get('/api/health', (req, res) => {
   const hasServerKey = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
@@ -2320,6 +3047,8 @@ async function startServer() {
   // instead of a forced kill that shows up as a "Crashed" deployment.
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server listening on http://0.0.0.0:${PORT} (PID: ${process.pid}, mode: ${isProduction ? 'production' : 'development'})`);
+    // Start autonomous server-side background subtitle translation loop
+    startBackgroundWorker();
   });
 
   // FIX (DEPLOY): graceful shutdown for Railway-style lifecycle management.
@@ -2331,6 +3060,7 @@ async function startServer() {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[Server] ${signal} received — starting graceful shutdown...`);
+    stopBackgroundWorker();
 
     // Safety net: if something still keeps the process alive, force the exit so the
     // platform is never left hanging.
